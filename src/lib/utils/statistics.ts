@@ -4,6 +4,7 @@
  * Every function in this module is side-effect free and safe to call from
  * Svelte 5 `$derived` computations. No DOM, no timers, no randomness.
  */
+import type { MetricSeries, MetricType, MetricUnit } from '$lib/types/monitor';
 
 /**
  * Trailing moving average.
@@ -107,4 +108,31 @@ export function scaleToRange(
   if (inMax === inMin) return outMin;
   const t = (value - inMin) / (inMax - inMin);
   return lerp(outMin, outMax, t);
+}
+
+/**
+ * Summarise a raw telemetry series into the chart-ready `MetricSeries` shape:
+ * min, max, mean, P95, standard deviation and a smoothed overlay.
+ *
+ * Stays pure so it can run inside a `$derived` without touching the database.
+ */
+export function summarizeMetricSeries(
+  metric: MetricType,
+  unit: MetricUnit,
+  timestamps: number[],
+  values: number[],
+  smoothingWindow = 5
+): MetricSeries {
+  return {
+    metric,
+    unit,
+    timestamps,
+    values,
+    min: calculateMin(values),
+    max: calculateMax(values),
+    average: calculateMean(values),
+    p95: calculateP95(values),
+    stdDev: calculateStdDev(values),
+    movingAverage: calculateMovingAverage(values, smoothingWindow)
+  };
 }

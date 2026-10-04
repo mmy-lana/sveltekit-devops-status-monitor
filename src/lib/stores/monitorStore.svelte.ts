@@ -6,22 +6,33 @@ import type {
   Incident,
   FleetSummary,
   MetricDataPoint,
+  MetricSeries,
+  MetricType,
   ServerStatus,
   LogEntry
 } from '$lib/types/monitor';
-import { evaluateThreshold } from '$lib/utils/alarmUtils';
+import {
+  METRIC_UNITS,
+  evaluateThreshold,
+  extractMetricValue
+} from '$lib/utils/alarmUtils';
 import { generateEntityId } from '$lib/utils/id';
+import { summarizeMetricSeries } from '$lib/utils/statistics';
 
 class MonitorState {
   servers = $state<ServerAsset[]>([]);
   alarms = $state<AlarmRule[]>([]);
   incidents = $state<Incident[]>([]);
   activeTelemetry = $state<Record<string, MetricDataPoint | null>>({});
+  /** Recent CPU history per server, powering the inline Sparkline column. */
+  sparklines = $state<Record<string, number[]>>({});
   isLoading = $state<boolean>(true);
-  autoRefreshInterval = $state<number>(10000);
+  autoRefreshInterval = $state<number>(15000);
   isPaused = $state<boolean>(false);
+  lastPollAt = $state<number | null>(null);
   private timer: number | null = null;
   private isPolling = false;
+  private sparklineTimer: number | null = null;
 
   fleetSummary: FleetSummary = $derived.by(() => {
     const totalCount = this.servers.length;
@@ -75,9 +86,88 @@ class MonitorState {
     try {
       await seedInitialDataIfEmpty();
       await this.loadInitialData();
+      await this.refreshSparklines();
       this.startPolling();
+      this.startSparklinePolling();
     } finally {
       this.isLoading = false;
+    }
+  }
+
+  /**
+   * Load one metric's history for a server and summarise it for the chart.
+   * Results are cached per server + metric + window so scrubbing the range
+   * selector does not re-query IndexedDB on every tick.
+   */
+  async loadMetricSeries(
+    serverId: string,
+    metric: MetricType,
+    sinceMs: number,
+    maxPoints = 240
+  ): Promise<MetricSeries> {
+    const unit = METRIC_UNITS[metric];
+    const records = await db.telemetry
+      .where('[serverId+timestamp]')
+      .between([serverId, sinceMs], [serverId, Date.now()], true, true)
+      .toArray();
+
+    const ordered = records.sort((a, b) => a.timestamp - b.timestamp);
+    const stride = Math.max(1, Math.ceil(ordered.length / maxPoints));
+    const sampled = stride > 1 ? ordered.filter((_, index) => index % stride === 0) : ordered;
+
+    return summarizeMetricSeries(
+      metric,
+      unit,
+      sampled.map((record) => record.timestamp),
+      sampled.map((record) => extractMetricValue(record.metrics, metric)),
+      5
+    );
+  }
+
+  /** Refresh the per-server CPU trend used by the table Sparkline column. */
+  async refreshSparklines(windowMs = 60 * 60 * 1000, points = 24): Promise<void> {
+    if (typeof window === 'undefined') return;
+    const since = Date.now() - windowMs;
+    const records = await db.telemetry.where('timestamp').above(since).toArray();
+
+    const grouped = new Map<string, number[]>();
+    for (const record of records) {
+      const bucket = grouped.get(record.serverId);
+      if (bucket) bucket.push(record.metrics.cpuUsage);
+      else grouped.set(record.serverId, [record.metrics.cpuUsage]);
+    }
+
+    const next: Record<string, number[]> = {};
+    for (const server of this.servers) {
+      const series = (grouped.get(server.id) ?? []).slice(-points);
+      next[server.id] = series;
+    }
+    this.sparklines = next;
+  }
+
+  /** CPU trend for a server, or an empty series while the cache is warming. */
+  sparklineFor(serverId: string): number[] {
+    return this.sparklines[serverId] ?? [];
+  }
+
+  private startSparklinePolling() {
+    if (typeof window === 'undefined') return;
+    if (this.sparklineTimer !== null) window.clearInterval(this.sparklineTimer);
+    this.sparklineTimer = window.setInterval(() => {
+      void this.refreshSparklines();
+    }, 30_000);
+  }
+
+  /** Stop every timer. Called by `destroy()` when the app unmounts. */
+  destroy() {
+    if (typeof window === 'undefined') return;
+    if (this.timer !== null) {
+      window.clearInterval(this.timer);
+      this.timer = null;
+    }
+    if (this.sparklineTimer !== null) {
+      window.clearInterval(this.sparklineTimer);
+      this.sparklineTimer = null;
     }
   }
 
@@ -177,6 +267,7 @@ class MonitorState {
 
       this.activeTelemetry = updatedTelemetry;
       this.servers = updatedServers;
+      this.lastPollAt = now;
     } finally {
       this.isPolling = false;
     }

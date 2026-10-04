@@ -114,12 +114,23 @@ function attachDiagnostics(page, sink) {
   page.on('close', () => clearInterval(poll));
 }
 
-/** Wait until the monitor store has finished its first IndexedDB hydration. */
+/**
+ * Wait until the monitor store has finished its IndexedDB hydration: the shell
+ * status pill must report a non-empty "healthy / total" ratio.
+ */
 async function waitForFleetReady(page) {
   await page.waitForFunction(
-    () => document.body.innerText.includes('/ 12 Healthy') || document.body.innerText.includes('/ 12'),
+    () => {
+      const pill = document.querySelector('[data-testid="fleet-status-pill"]');
+      if (!pill) return false;
+      const match = pill.textContent?.match(/(\d+)\s*\/\s*(\d+)\s*Healthy/);
+      if (!match) return false;
+      const healthy = Number(match[1]);
+      const total = Number(match[2]);
+      return total > 0 && healthy <= total;
+    },
     undefined,
-    { timeout: 20_000 }
+    { timeout: 30_000 }
   );
 }
 
@@ -617,85 +628,240 @@ async function checkPhase2(page) {
 async function checkPhase3(page) {
   section('Phase 3 · Compound Molecules');
 
+  await page.goto(`${BASE_URL}/servers/srv-use1-api-01`, { waitUntil: 'networkidle' });
+  await waitForFleetReady(page);
+  await page.waitForSelector('[data-testid="metric-chart"], [data-testid="chart-loading"]', {
+    timeout: 20_000
+  });
+  await page.waitForTimeout(1200);
+
   const chart = await page.evaluate(() => {
     const svg = document.querySelector('[data-testid="metric-chart"]');
     if (!svg) return { found: false };
-    const polylines = svg.querySelectorAll('polyline[data-series]');
-    const areas = svg.querySelectorAll('path[data-area]');
     const verticalAxisTexts = svg.querySelectorAll('text[data-axis="y-left"], text[data-axis="y-right"]');
-    const gridLines = svg.querySelectorAll('line[data-grid]');
-    const scrubber = svg.querySelector('[data-testid="chart-scrubber"]');
     return {
       found: true,
-      series: polylines.length,
-      areas: areas.length,
-      verticalAxis: verticalAxisTexts.length,
-      grid: gridLines.length,
-      scrubberPresent: Boolean(scrubber),
+      series: svg.querySelectorAll('polyline[data-series]').length,
+      areas: svg.querySelectorAll('path[data-area]').length,
+      leftAxis: svg.querySelectorAll('text[data-axis="y-left"]').length,
+      rightAxis: svg.querySelectorAll('text[data-axis="y-right"]').length,
+      grid: svg.querySelectorAll('line[data-grid]').length,
+      maxAxisFont: Math.max(
+        0,
+        ...Array.from(verticalAxisTexts).map((t) => Number.parseFloat(getComputedStyle(t).fontSize))
+      ),
       width: Math.round(svg.getBoundingClientRect().width)
     };
   });
 
   assert(chart.found, 'MetricChart renders a [data-testid="metric-chart"] SVG');
   if (chart.found) {
-    assert(chart.series >= 2, `MetricChart draws a dual series (${chart.series} polylines)`);
-    assert(chart.areas >= 2, `MetricChart fills series areas (${chart.areas} paths)`);
-    assert(chart.verticalAxis >= 4, `MetricChart labels both Y axes (${chart.verticalAxis} tick labels)`);
+    assertEqual(chart.series, 2, 'MetricChart draws both series as polylines');
+    assertEqual(chart.areas, 2, 'MetricChart fills an area under each series');
+    assert(
+      chart.leftAxis >= 4 && chart.rightAxis >= 4,
+      `MetricChart labels both Y axes (left:${chart.leftAxis} right:${chart.rightAxis})`
+    );
     assert(chart.grid >= 3, `MetricChart draws horizontal gridlines (${chart.grid})`);
+    assert(chart.maxAxisFont <= 10, `Axis type never exceeds 10px (${chart.maxAxisFont}px)`);
     assert(chart.width > 200, `MetricChart fills its container (${chart.width}px wide)`);
-  }
 
-  // Touch scrubbing: tap near the right edge and assert a readout appears.
-  if (chart.found) {
     const box = await page.locator('[data-testid="metric-chart"]').boundingBox();
     if (box) {
       await page.mouse.move(box.x + box.width * 0.6, box.y + box.height * 0.5);
-      await page.waitForTimeout(150);
-      const readout = await page.locator('[data-testid="chart-readout"]').count();
-      assert(readout > 0, 'MetricChart exposes a scrub readout on pointer interaction');
+      await page.waitForTimeout(250);
+      assert(
+        (await page.locator('[data-testid="chart-readout"]').count()) > 0,
+        'MetricChart exposes a scrub readout on pointer interaction'
+      );
+      assert(
+        (await page.locator('[data-testid="chart-scrubber"]').count()) > 0,
+        'MetricChart renders a scrub handle during interaction'
+      );
 
-      const scrubberCount = await page.locator('[data-testid="chart-scrubber"]').count();
-      assert(scrubberCount > 0, 'MetricChart renders a scrub handle during interaction');
+      const geometry = await page.evaluate(() => {
+        const bubble = document.querySelector('[data-testid="chart-readout"]');
+        const svg = document.querySelector('[data-testid="metric-chart"]');
+        if (!bubble || !svg) return null;
+        const b = bubble.getBoundingClientRect();
+        const s = svg.getBoundingClientRect();
+        return { b, s };
+      });
+      if (geometry) {
+        assert(
+          geometry.b.bottom <= geometry.s.bottom,
+          'Chart readout stays inside the plot rather than spilling below it'
+        );
+        assert(
+          geometry.b.right <= geometry.s.right + 1 && geometry.b.left >= geometry.s.left - 1,
+          'Chart readout is clamped inside the plot bounds'
+        );
+      }
+
+      await page.mouse.move(box.x + box.width * 0.2, box.y + box.height * 0.5);
+      await page.waitForTimeout(200);
+      assert(
+        (await page.locator('[data-testid="chart-readout"]').count()) > 0,
+        'Scrub readout follows the pointer across the plot'
+      );
+      await page.mouse.move(4, 4);
+      await page.waitForTimeout(200);
     }
   }
 
-  const sparklines = await page.locator('[data-testid="sparkline"]').count();
-  assert(sparklines > 0, `Server table renders inline Sparklines (${sparklines} found)`);
-
-  const sparklineBox = sparklines > 0 ? await page.locator('[data-testid="sparkline"]').first().boundingBox() : null;
-  if (sparklineBox) {
+  const tabCount = await page.locator('[data-testid="metric-tab"]').count();
+  assertEqual(tabCount, 4, 'Server detail exposes four metric tabs');
+  if (tabCount === 4) {
+    await page.locator('[data-testid="metric-tab"]').nth(3).click();
+    await page.waitForTimeout(1000);
+    const selected = await page
+      .locator('[data-testid="metric-tab"]')
+      .nth(3)
+      .getAttribute('aria-selected');
+    assertEqual(selected, 'true', 'Metric tabs update aria-selected on activation');
     assert(
-      sparklineBox.width >= 70 && sparklineBox.width <= 96 && sparklineBox.height >= 20 && sparklineBox.height <= 30,
-      `Sparkline renders at the 80x24 spec (${Math.round(sparklineBox.width)}x${Math.round(sparklineBox.height)})`
+      (await page.locator('[data-testid="metric-chart"]').count()) > 0,
+      'Switching metric tabs re-renders the chart'
     );
   }
 
   const timeRangeButtons = await page.locator('[data-testid="time-range-selector"] button').count();
   assertEqual(timeRangeButtons, 6, 'TimeRangeSelector renders all six range buttons');
+  if (timeRangeButtons === 6) {
+    await page.locator('[data-testid="time-range-7d"]').click();
+    await page.waitForTimeout(1000);
+    assertEqual(
+      await page.locator('[data-testid="time-range-7d"]').getAttribute('aria-pressed'),
+      'true',
+      'TimeRangeSelector marks the chosen range as pressed'
+    );
+    assert(
+      (await page.locator('[data-testid="metric-chart"]').count()) > 0,
+      'Switching to the 7d range re-renders the chart'
+    );
+    await page.locator('[data-testid="time-range-1h"]').click();
+    await page.waitForTimeout(700);
+  }
 
-  const refreshOptions = await page.locator('[data-testid="refresh-rate-dropdown"] select option').count();
-  assert(refreshOptions >= 4, `RefreshRateDropdown offers interval + paused options (${refreshOptions})`);
+  const refreshOptions = await page.locator('[data-testid="refresh-rate-dropdown"] option').count();
+  assertEqual(refreshOptions, 5, 'RefreshRateDropdown offers 5s, 15s, 30s, 60s and Paused');
+
+  await page.locator('[data-testid="refresh-rate-select"]').selectOption('0');
+  await page.waitForTimeout(300);
+  const paused = await page.locator('[data-testid="footer-refresh"]').textContent();
+  assert(paused?.includes('paused'), `Selecting 0ms pauses the poll loop (${paused?.trim()})`);
+  await page.locator('[data-testid="refresh-rate-select"]').selectOption('15000');
+  await page.waitForTimeout(300);
+  const resumed = await page.locator('[data-testid="footer-refresh"]').textContent();
+  assert(resumed?.includes('15s'), `Resuming restores the 15s cadence (${resumed?.trim()})`);
 
   const logConsole = await page.locator('[data-testid="log-console"]').count();
   assert(logConsole > 0, 'LogConsole is mounted on the server detail route');
-
   if (logConsole > 0) {
-    const before = await page.locator('[data-testid="log-line"]').count();
-    assert(before > 0, `LogConsole renders persisted log lines (${before})`);
-    const search = page.locator('[data-testid="log-search"]');
-    if (await search.count()) {
-      await search.fill('zzzz-no-match-zzzz');
-      await page.waitForTimeout(120);
-      const after = await page.locator('[data-testid="log-line"]').count();
-      assertEqual(after, 0, 'LogConsole search filters every line out when nothing matches');
-      assert(
-        (await page.locator('[data-testid="log-empty"]').count()) > 0,
-        'LogConsole shows an explicit empty state for a non-matching query'
-      );
-      await search.fill('');
-      await page.waitForTimeout(120);
-      assert((await page.locator('[data-testid="log-line"]').count()) > 0, 'LogConsole search clears cleanly');
-    }
+    await page
+      .waitForFunction(() => document.querySelectorAll('[data-testid="log-line"]').length > 0, undefined, {
+        timeout: 20_000
+      })
+      .catch(() => undefined);
+    assert((await page.locator('[data-testid="log-line"]').count()) > 0, 'LogConsole renders persisted log lines');
+    assertEqual(
+      await page.locator('[data-testid="log-level-WARN"]').getAttribute('aria-pressed'),
+      'true',
+      'WARN level chip starts active'
+    );
+
+    await page.locator('[data-testid="log-level-INFO"]').click();
+    await page.waitForTimeout(300);
+    const levels = await page.evaluate(() => [
+      ...new Set(
+        Array.from(document.querySelectorAll('[data-testid="log-line"]')).map((el) =>
+          el.getAttribute('data-level')
+        )
+      )
+    ]);
+    assert(!levels.includes('INFO'), `Toggling INFO off removes those lines (${levels.join(', ')})`);
+    await page.locator('[data-testid="log-level-INFO"]').click();
+    await page.waitForTimeout(300);
+
+    await page.locator('[data-testid="log-search"]').fill('Telemetry|cache');
+    await page.waitForTimeout(350);
+    assert(
+      (await page.locator('[data-testid="log-line"]').count()) > 0,
+      'LogConsole accepts a regular expression alternation query'
+    );
+
+    await page.locator('[data-testid="log-search"]').fill('(unclosed');
+    await page.waitForTimeout(300);
+    assert(
+      (await page.locator('[data-testid="log-search-error"]').count()) > 0,
+      'LogConsole surfaces an explicit error for an invalid regular expression'
+    );
+
+    await page.locator('[data-testid="log-search"]').fill('zzzz-no-match-zzzz');
+    await page.waitForTimeout(300);
+    assertEqual(
+      await page.locator('[data-testid="log-line"]').count(),
+      0,
+      'LogConsole filters every line out when nothing matches'
+    );
+    assert(
+      (await page.locator('[data-testid="log-empty"]').count()) > 0,
+      'LogConsole shows an explicit empty state for a non-matching query'
+    );
+    assert(
+      (await page.locator('[data-testid="log-empty-reset"]').count()) > 0,
+      'LogConsole empty state offers a way out'
+    );
+    await page.locator('[data-testid="log-empty-reset"]').click();
+    await page.waitForTimeout(300);
+    assert(
+      (await page.locator('[data-testid="log-line"]').count()) > 0,
+      'Clearing the LogConsole filters restores the stream'
+    );
+  }
+
+  await page.goto(`${BASE_URL}/`, { waitUntil: 'networkidle' });
+  await waitForFleetReady(page);
+  await page.waitForTimeout(700);
+  const sparklines = await page.locator('[data-testid="sparkline"]').count();
+  assert(sparklines > 0, `Server table renders inline Sparklines (${sparklines} found)`);
+
+  const sparklineBox =
+    sparklines > 0 ? await page.locator('[data-testid="sparkline"]').first().boundingBox() : null;
+  if (sparklineBox) {
+    assert(
+      sparklineBox.width >= 70 &&
+        sparklineBox.width <= 96 &&
+        sparklineBox.height >= 20 &&
+        sparklineBox.height <= 30,
+      `Sparkline renders at the 80x24 spec (${Math.round(sparklineBox.width)}x${Math.round(sparklineBox.height)})`
+    );
+  }
+
+  const toolbar = await page.locator('[data-testid="filter-toolbar"]').count();
+  assert(toolbar > 0, 'FilterSearchToolbar is mounted on the dashboard');
+  if (toolbar > 0) {
+    const criticalCount = await page
+      .locator('[data-testid="status-count-critical"]')
+      .textContent();
+    assert(
+      /^\d+$/.test((criticalCount ?? '').trim()),
+      `Status pills report live numeric counts (critical = ${criticalCount?.trim()})`
+    );
+    await page.locator('[data-testid="status-filter-warning"]').click();
+    await page.waitForTimeout(350);
+    assertEqual(
+      await page.locator('[data-testid="status-filter-warning"]').getAttribute('aria-pressed'),
+      'true',
+      'Status pills expose their pressed state'
+    );
+    await page.locator('[data-testid="filter-reset"]').click();
+    await page.waitForTimeout(300);
+    assertEqual(
+      await countVisible(page, '[data-testid="server-row-name"]'),
+      12,
+      'Resetting the toolbar restores the full fleet'
+    );
   }
 }
 
@@ -980,15 +1146,6 @@ async function main() {
 
     if (maxPhase >= 1) await checkPhase1(phase1Page);
     if (maxPhase >= 2) await checkPhase2(phase1Page);
-
-    if (maxPhase >= 3 || maxPhase >= 4 || maxPhase >= 5) {
-      await phase1Page.goto(`${BASE_URL}/servers/srv-use1-api-01`, { waitUntil: 'networkidle' });
-      await waitForFleetReady(phase1Page);
-      await phase1Page.waitForTimeout(400);
-      await phase1Page.goto(`${BASE_URL}/`, { waitUntil: 'networkidle' });
-      await waitForFleetReady(phase1Page);
-      await phase1Page.waitForTimeout(300);
-    }
 
     if (maxPhase >= 3) await checkPhase3(phase1Page);
 
