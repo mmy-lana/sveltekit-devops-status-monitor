@@ -1,61 +1,161 @@
 <script lang="ts">
   import '../app.css';
   import { onMount } from 'svelte';
+  import { page } from '$app/state';
   import { monitorStore } from '$lib/stores/monitorStore.svelte';
+  import Badge from '$lib/components/primitives/Badge.svelte';
+  import Button from '$lib/components/primitives/Button.svelte';
 
-  let { children } = $props();
+  interface Props {
+    children: import('svelte').Snippet;
+  }
+
+  let { children }: Props = $props();
+
+  const NAV_ITEMS = [
+    { href: '/', label: 'Fleet Dashboard', match: (path: string) => path === '/' },
+    { href: '/alarms', label: 'Alarms', match: (path: string) => path.startsWith('/alarms') },
+    { href: '/incidents', label: 'Incidents', match: (path: string) => path.startsWith('/incidents') }
+  ] as const;
+
+  const pathname = $derived(page.url.pathname);
+  const summary = $derived(monitorStore.fleetSummary);
+  const fleetTone = $derived(
+    summary.criticalCount > 0 ? 'critical' : summary.warningCount > 0 ? 'warning' : 'healthy'
+  );
 
   onMount(() => {
-    monitorStore.initialize();
+    void monitorStore.initialize();
   });
 </script>
 
-<div class="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans">
-  <header class="border-b border-slate-800 bg-slate-900/90 backdrop-blur sticky top-0 z-40 px-4 py-2.5">
-    <div class="max-w-7xl mx-auto flex items-center justify-between">
-      <div class="flex items-center space-x-6">
-        <a href="/" class="flex items-center space-x-2.5 group">
-          <div class="w-6 h-6 rounded bg-amber-500/10 border border-amber-500/40 flex items-center justify-center text-amber-500 font-mono font-bold text-xs">
-            CW
-          </div>
-          <span class="font-semibold text-sm tracking-tight text-slate-100 group-hover:text-amber-400 transition-colors">
-            CloudWatch Status Monitor
-          </span>
-        </a>
+<div class="flex min-h-screen flex-col bg-slate-base font-sans text-cw-text">
+  <header
+    class="sticky top-0 z-40 border-b border-slate-border bg-slate-surface/95 backdrop-blur supports-[backdrop-filter]:bg-slate-surface/80"
+  >
+    <div class="mx-auto flex w-full max-w-[1600px] flex-wrap items-center gap-x-4 gap-y-2 px-4 py-2.5">
+      <a
+        href="/"
+        class="flex min-h-11 items-center gap-2.5 rounded pr-2 transition-colors hover:bg-white/5"
+      >
+        <span
+          class="flex h-7 w-7 shrink-0 items-center justify-center rounded border border-cw-accent/45 bg-cw-accent/12 font-mono text-[11px] font-bold text-cw-accent"
+          aria-hidden="true"
+          >CW</span
+        >
+        <span class="flex flex-col leading-tight">
+          <span class="text-[13px] font-semibold tracking-tight text-cw-text">Status Monitor</span>
+          <span class="font-mono text-[10px] text-cw-faint">CloudWatch Telemetry</span>
+        </span>
+      </a>
 
-        <nav class="hidden md:flex items-center space-x-1 text-xs font-medium text-slate-400">
-          <a href="/" class="px-3 py-1.5 rounded hover:bg-slate-800 hover:text-slate-200 transition-colors">Fleet Dashboard</a>
-          <a href="/alarms" class="px-3 py-1.5 rounded hover:bg-slate-800 hover:text-slate-200 transition-colors">Alarms</a>
-          <a href="/incidents" class="px-3 py-1.5 rounded hover:bg-slate-800 hover:text-slate-200 transition-colors">Incidents</a>
-        </nav>
-      </div>
+      <nav
+        aria-label="Primary"
+        class="order-3 -mx-1 w-full overflow-x-auto md:order-none md:mx-0 md:w-auto md:flex-1"
+      >
+        <ul class="scroll-strip md:justify-center">
+          {#each NAV_ITEMS as item (item.href)}
+            <li>
+              <a
+                href={item.href}
+                aria-current={item.match(pathname) ? 'page' : undefined}
+                class="flex h-11 items-center rounded px-3 text-[13px] font-medium transition-colors {item.match(
+                  pathname
+                )
+                  ? 'bg-cw-accent/14 text-cw-accent ring-1 ring-inset ring-cw-accent/35'
+                  : 'text-cw-muted hover:bg-white/5 hover:text-cw-text'}"
+              >
+                {item.label}
+              </a>
+            </li>
+          {/each}
+        </ul>
+      </nav>
 
-      <div class="flex items-center space-x-3 text-xs">
-        <div class="flex items-center space-x-1.5 bg-slate-950/60 border border-slate-800 px-2.5 py-1 rounded">
-          <span class="w-2 h-2 rounded-full {monitorStore.fleetSummary.criticalCount > 0 ? 'bg-rose-500 animate-pulse' : 'bg-emerald-500'}"></span>
-          <span class="font-mono text-slate-300">
-            {monitorStore.fleetSummary.healthyCount}/{monitorStore.fleetSummary.totalCount} Healthy
+      <div class="ml-auto flex shrink-0 items-center gap-2">
+        <div
+          data-testid="fleet-status-pill"
+          class="flex h-9 items-center gap-2 rounded border border-slate-border-strong bg-slate-base px-2.5"
+        >
+          <span
+            class="inline-block h-2 w-2 shrink-0 rounded-full {fleetTone === 'critical'
+              ? 'bg-cw-rose animate-pulse'
+              : fleetTone === 'warning'
+                ? 'bg-cw-amber'
+                : 'bg-cw-emerald'}"
+            aria-hidden="true"
+          ></span>
+          <span class="tnum font-mono text-[11px] text-cw-muted">
+            {summary.healthyCount}/{summary.totalCount} Healthy
           </span>
         </div>
 
-        {#if monitorStore.fleetSummary.activeAlarmsCount > 0}
-          <div class="bg-rose-950/40 border border-rose-800/60 text-rose-300 font-mono px-2 py-0.5 rounded flex items-center space-x-1">
-            <span>[ALARM]</span>
-            <span>{monitorStore.fleetSummary.activeAlarmsCount}</span>
-          </div>
+        {#if summary.activeAlarmsCount > 0}
+          <a
+            href="/alarms"
+            data-testid="alarm-bell"
+            class="flex h-9 items-center gap-1.5 rounded border border-cw-rose/45 bg-cw-rose/12 px-2.5 font-mono text-[11px] text-cw-rose transition-colors hover:bg-cw-rose/20"
+          >
+            <span class="sr-only">Active alarms:</span>
+            <svg viewBox="0 0 16 16" class="h-3.5 w-3.5" fill="currentColor" aria-hidden="true">
+              <path
+                d="M8 1.4a4.1 4.1 0 0 0-4.1 4.1v2.3L2.6 9.8a.5.5 0 0 0 .44.75h9.92a.5.5 0 0 0 .44-.75L12.1 7.8V5.5A4.1 4.1 0 0 0 8 1.4Zm-1.8 10.2a1.9 1.9 0 0 0 3.6 0H6.2Z"
+              />
+            </svg>
+            <span class="tnum font-semibold" data-testid="alarm-count">{summary.activeAlarmsCount}</span>
+          </a>
         {/if}
+
+        <Button
+          variant="icon"
+          size="sm"
+          ariaLabel="Refresh telemetry now"
+          title="Refresh telemetry now"
+          onclick={() => void monitorStore.pollCycle()}
+        >
+          <svg viewBox="0 0 16 16" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
+            <path d="M14 8a6 6 0 1 1-1.76-4.24" stroke-linecap="round" />
+            <path d="M14 1.5V5h-3.5" stroke-linecap="round" stroke-linejoin="round" />
+          </svg>
+        </Button>
       </div>
     </div>
   </header>
 
-  <main class="flex-1 max-w-7xl w-full mx-auto p-4 md:p-6">
-    {@render children()}
-  </main>
+  {#if monitorStore.isLoading}
+    <div
+      class="flex min-h-[50vh] items-center justify-center px-4"
+      role="status"
+      aria-live="polite"
+      data-testid="boot-loading"
+    >
+      <div class="flex flex-col items-center gap-3">
+        <span
+          class="h-6 w-6 animate-spin rounded-full border-2 border-cw-accent border-r-transparent"
+          aria-hidden="true"
+        ></span>
+        <p class="font-mono text-[11px] text-cw-muted">Hydrating IndexedDB telemetry store…</p>
+      </div>
+    </div>
+  {:else}
+    <main class="mx-auto w-full max-w-[1600px] flex-1 px-4 py-4 md:px-6 md:py-6">
+      {@render children?.()}
+    </main>
+  {/if}
 
-  <footer class="border-t border-slate-900 bg-slate-950/80 px-4 py-3 text-xs text-slate-500 font-mono">
-    <div class="max-w-7xl mx-auto flex flex-col sm:flex-row justify-between items-center gap-2">
-      <div>AWS CloudWatch Infrastructure Telemetry Simulator</div>
-      <div>IndexedDB Engine: Active</div>
+  <footer class="border-t border-slate-border bg-slate-surface/60 px-4 py-3">
+    <div
+      class="mx-auto flex w-full max-w-[1600px] flex-col items-start justify-between gap-1.5 font-mono text-[10px] text-cw-faint sm:flex-row sm:items-center"
+    >
+      <span>AWS CloudWatch infrastructure telemetry simulator</span>
+      <span class="flex items-center gap-3">
+        <Badge variant="neutral" size="sm" value="IndexedDB" label="IndexedDB engine active" dot />
+        <span data-testid="footer-refresh">
+          {monitorStore.isPaused
+            ? 'Auto-refresh paused'
+            : `Auto-refresh ${Math.round(monitorStore.autoRefreshInterval / 1000)}s`}
+        </span>
+      </span>
     </div>
   </footer>
 </div>

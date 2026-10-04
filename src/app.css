@@ -1,19 +1,238 @@
 @import "tailwindcss";
 
+/* ------------------------------------------------------------------ */
+/* Design tokens                                                       */
+/* ------------------------------------------------------------------ */
+
 @theme {
+  /* Surfaces — AWS CloudWatch "Clean Slate" dark console */
   --color-slate-base: #0b0f17;
   --color-slate-surface: #111827;
   --color-slate-card: #161f30;
+  --color-slate-border: #1e293b;
+  --color-slate-border-strong: #27354a;
+
+  /* Brand + metric accents */
   --color-cw-accent: #ec7211;
+  --color-cw-accent-hover: #f5821f;
   --color-cw-blue: #38bdf8;
   --color-cw-amber: #f59e0b;
   --color-cw-emerald: #10b981;
   --color-cw-rose: #ef4444;
-  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  --color-cw-violet: #a78bfa;
+
+  /* Typography */
+  --color-cw-text: #f8fafc;
+  --color-cw-muted: #94a3b8;
+  --color-cw-faint: #64748b;
+
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono',
+    'Courier New', monospace;
+  --font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto,
+    'Helvetica Neue', Arial, sans-serif;
+
+  /* Elevation */
+  --shadow-panel: 0 1px 2px rgb(0 0 0 / 0.45);
+  --shadow-overlay: 0 18px 45px -12px rgb(0 0 0 / 0.72);
 }
 
-body {
-  background-color: var(--color-slate-base);
-  color: #f8fafc;
-  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+/* ------------------------------------------------------------------ */
+/* Base styling                                                        */
+/* ------------------------------------------------------------------ */
+
+@layer base {
+  html {
+    color-scheme: dark;
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    background-color: var(--color-slate-base);
+    color: var(--color-cw-text);
+    font-family: var(--font-sans);
+    font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    overflow-x: hidden;
+  }
+
+  /* The app owns all scrolling regions; never let the page scroll sideways. */
+  html,
+  body {
+    max-width: 100vw;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-cw-accent);
+    outline-offset: 2px;
+    border-radius: 2px;
+  }
+
+  ::selection {
+    background-color: color-mix(in srgb, var(--color-cw-accent) 40%, transparent);
+    color: var(--color-cw-text);
+  }
+
+  h1,
+  h2,
+  h3,
+  h4 {
+    letter-spacing: -0.015em;
+  }
+
+  /* Console scrollbars */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--color-slate-border-strong) transparent;
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background-color: var(--color-slate-border-strong);
+    border-radius: 999px;
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background-color: #33415c;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Guaranteed theme utilities                                          */
+/*                                                                     */
+/* Declared explicitly so every token is always emitted, regardless of  */
+/* whether a component happens to reference it in a class string.      */
+/* ------------------------------------------------------------------ */
+
+@layer utilities {
+  .bg-cw-accent {
+    background-color: var(--color-cw-accent);
+  }
+  .bg-cw-accent-hover {
+    background-color: var(--color-cw-accent-hover);
+  }
+  .text-cw-accent {
+    color: var(--color-cw-accent);
+  }
+  .border-cw-accent {
+    border-color: var(--color-cw-accent);
+  }
+  .bg-cw-blue {
+    background-color: var(--color-cw-blue);
+  }
+  .text-cw-blue {
+    color: var(--color-cw-blue);
+  }
+  .border-cw-blue {
+    border-color: var(--color-cw-blue);
+  }
+  .bg-cw-amber {
+    background-color: var(--color-cw-amber);
+  }
+  .text-cw-amber {
+    color: var(--color-cw-amber);
+  }
+  .border-cw-amber {
+    border-color: var(--color-cw-amber);
+  }
+  .bg-cw-emerald {
+    background-color: var(--color-cw-emerald);
+  }
+  .text-cw-emerald {
+    color: var(--color-cw-emerald);
+  }
+  .border-cw-emerald {
+    border-color: var(--color-cw-emerald);
+  }
+  .bg-cw-rose {
+    background-color: var(--color-cw-rose);
+  }
+  .text-cw-rose {
+    color: var(--color-cw-rose);
+  }
+  .border-cw-rose {
+    border-color: var(--color-cw-rose);
+  }
+  .bg-cw-violet {
+    background-color: var(--color-cw-violet);
+  }
+  .text-cw-violet {
+    color: var(--color-cw-violet);
+  }
+  .bg-slate-base {
+    background-color: var(--color-slate-base);
+  }
+  .bg-slate-surface {
+    background-color: var(--color-slate-surface);
+  }
+  .bg-slate-card {
+    background-color: var(--color-slate-card);
+  }
+  .border-slate-border {
+    border-color: var(--color-slate-border);
+  }
+  .text-cw-text {
+    color: var(--color-cw-text);
+  }
+  .text-cw-muted {
+    color: var(--color-cw-muted);
+  }
+  .text-cw-faint {
+    color: var(--color-cw-faint);
+  }
+  .font-mono {
+    font-family: var(--font-mono);
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Component-level behaviours                                          */
+/* ------------------------------------------------------------------ */
+
+@layer components {
+  /* Horizontally scrollable filter strips: momentum scroll on touch with
+     hidden scrollbar chrome so the pill row stays visually quiet. */
+  .scroll-strip {
+    display: flex;
+    gap: 0.5rem;
+    overflow-x: auto;
+    scroll-snap-type: x proximity;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+
+  .scroll-strip::-webkit-scrollbar {
+    display: none;
+  }
+
+  .scroll-strip > * {
+    scroll-snap-align: start;
+    flex-shrink: 0;
+  }
+
+  /* Monospaced telemetry readouts. */
+  .tnum {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
 }

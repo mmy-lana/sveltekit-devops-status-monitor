@@ -40,6 +40,30 @@ function assertEqual(actual, expected, message) {
   );
 }
 
+/** Count elements that actually render, ignoring container-query hidden branches. */
+async function countVisible(page, selector) {
+  return page.evaluate((sel) => {
+    let count = 0;
+    for (const el of document.querySelectorAll(sel)) {
+      const rect = el.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0 && getComputedStyle(el).visibility !== 'hidden') count += 1;
+    }
+    return count;
+  }, selector);
+}
+
+/** Read the trimmed text of every visible match. */
+async function textsOfVisible(page, selector) {
+  return page.evaluate((sel) => {
+    const out = [];
+    for (const el of document.querySelectorAll(sel)) {
+      const rect = el.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) out.push((el.textContent ?? '').trim());
+    }
+    return out;
+  }, selector);
+}
+
 function section(title) {
   currentCheck = title;
   console.log(`\n\x1b[1m${title}\x1b[0m`);
@@ -68,6 +92,26 @@ function attachDiagnostics(page, sink) {
   page.on('requestfailed', (request) =>
     sink.push(`[requestfailed] ${request.url()} ${request.failure()?.errorText ?? ''}`)
   );
+
+  // Vite surfaces compile/runtime failures in a shadow-DOM overlay that would
+  // otherwise silently swallow later interactions.
+  const poll = setInterval(async () => {
+    try {
+      const message = await page.evaluate(() => {
+        const overlay = document.querySelector('vite-error-overlay');
+        if (!overlay) return null;
+        const root = overlay.shadowRoot;
+        return (
+          root?.querySelector('.message-body, .message')?.textContent?.replace(/\s+/g, ' ').trim() ??
+          'vite error overlay present'
+        );
+      });
+      if (message) sink.push(`[vite-overlay] ${message}`);
+    } catch {
+      /* page closed mid-poll */
+    }
+  }, 700);
+  page.on('close', () => clearInterval(poll));
 }
 
 /** Wait until the monitor store has finished its first IndexedDB hydration. */
@@ -317,26 +361,43 @@ async function checkPhase2(page) {
 
   const tokens = await page.evaluate(() => {
     const styles = getComputedStyle(document.documentElement);
-    const probe = document.createElement('div');
-    probe.className = 'bg-cw-accent text-cw-blue border-cw-rose bg-cw-emerald text-cw-amber';
-    document.body.appendChild(probe);
-    const bg = getComputedStyle(probe).backgroundColor;
-    const fg = getComputedStyle(probe).color;
-    const border = getComputedStyle(probe).borderColor;
-    probe.remove();
+    const readToken = (token) => styles.getPropertyValue(token).trim();
+
+    /** Resolve a single utility class in isolation so nothing else can win. */
+    const probeOne = (utility, property) => {
+      const probe = document.createElement('div');
+      probe.className = utility;
+      document.body.appendChild(probe);
+      const computed = getComputedStyle(probe);
+      const value =
+        property === 'backgroundColor'
+          ? computed.backgroundColor
+          : property === 'color'
+            ? computed.color
+            : property === 'fontFamily'
+              ? computed.fontFamily
+              : computed.borderTopColor;
+      probe.remove();
+      return value;
+    };
+
     return {
-      base: styles.getPropertyValue('--color-slate-base').trim(),
-      surface: styles.getPropertyValue('--color-slate-surface').trim(),
-      card: styles.getPropertyValue('--color-slate-card').trim(),
-      accent: styles.getPropertyValue('--color-cw-accent').trim(),
-      blue: styles.getPropertyValue('--color-cw-blue').trim(),
-      amber: styles.getPropertyValue('--color-cw-amber').trim(),
-      emerald: styles.getPropertyValue('--color-cw-emerald').trim(),
-      rose: styles.getPropertyValue('--color-cw-rose').trim(),
+      base: readToken('--color-slate-base'),
+      surface: readToken('--color-slate-surface'),
+      card: readToken('--color-slate-card'),
+      accent: readToken('--color-cw-accent'),
+      blue: readToken('--color-cw-blue'),
+      amber: readToken('--color-cw-amber'),
+      emerald: readToken('--color-cw-emerald'),
+      rose: readToken('--color-cw-rose'),
       bodyBg: getComputedStyle(document.body).backgroundColor,
-      probeBg: bg,
-      probeFg: fg,
-      probeBorder: border
+      accentBg: probeOne('bg-cw-accent', 'backgroundColor'),
+      blueFg: probeOne('text-cw-blue', 'color'),
+      amberFg: probeOne('text-cw-amber', 'color'),
+      roseBorder: probeOne('border-cw-rose', 'borderColor'),
+      emeraldBg: probeOne('bg-cw-emerald', 'backgroundColor'),
+      cardBg: probeOne('bg-slate-card', 'backgroundColor'),
+      monoFamily: probeOne('font-mono', 'fontFamily')
     };
   });
 
@@ -348,10 +409,205 @@ async function checkPhase2(page) {
   assertEqual(tokens.amber, '#f59e0b', 'Theme token --color-cw-amber is #f59e0b');
   assertEqual(tokens.emerald, '#10b981', 'Theme token --color-cw-emerald is #10b981');
   assertEqual(tokens.rose, '#ef4444', 'Theme token --color-cw-rose is #ef4444');
-  assert(tokens.probeBg.includes('236, 114, 17'), `bg-cw-accent utility compiles (${tokens.probeBg})`);
-  assert(tokens.probeFg.includes('56, 189, 248'), `text-cw-blue utility compiles (${tokens.probeFg})`);
-  assert(tokens.probeBorder.includes('239, 68, 68'), `border-cw-rose utility compiles (${tokens.probeBorder})`);
-  assert(tokens.bodyBg.includes('11, 15, 23'), `Body paints the Clean Slate base colour (${tokens.bodyBg})`);
+  assertEqual(tokens.accentBg, 'rgb(236, 114, 17)', `bg-cw-accent utility compiles (${tokens.accentBg})`);
+  assertEqual(tokens.blueFg, 'rgb(56, 189, 248)', `text-cw-blue utility compiles (${tokens.blueFg})`);
+  assertEqual(tokens.amberFg, 'rgb(245, 158, 11)', `text-cw-amber utility compiles (${tokens.amberFg})`);
+  assertEqual(tokens.roseBorder, 'rgb(239, 68, 68)', `border-cw-rose utility compiles (${tokens.roseBorder})`);
+  assertEqual(tokens.emeraldBg, 'rgb(16, 185, 129)', `bg-cw-emerald utility compiles (${tokens.emeraldBg})`);
+  assertEqual(tokens.cardBg, 'rgb(22, 31, 48)', `bg-slate-card utility compiles (${tokens.cardBg})`);
+  assert(tokens.monoFamily.includes('monospace'), `font-mono utility compiles (${tokens.monoFamily})`);
+  assertEqual(tokens.bodyBg, 'rgb(11, 15, 23)', `Body paints the Clean Slate base colour (${tokens.bodyBg})`);
+
+  // ---- Badge tone mapping -----------------------------------------------
+  const badgeMap = await page.evaluate(() => {
+    const rows = Array.from(document.querySelectorAll('[data-testid="table-row"]'));
+    const byName = new Map();
+    for (const row of rows) {
+      const name = row.querySelector('[data-testid="server-row-link"]')?.textContent?.trim() ?? '';
+      const badge = row.querySelector('[data-testid="badge"][data-variant="status"]');
+      byName.set(name, badge?.getAttribute('data-tone') ?? null);
+    }
+    return Object.fromEntries(byName);
+  });
+  assertEqual(badgeMap['prod-use1-api-gw-01'], 'emerald', 'Badge maps a healthy server to the emerald tone');
+  assertEqual(badgeMap['prod-usw2-k8s-worker-01'], 'amber', 'Badge maps a warning server to the amber tone');
+  assertEqual(badgeMap['dev-sae1-edge-sim-01'], 'slate', 'Badge maps an offline server to the slate tone');
+
+  const badgeLabel = await page.evaluate(() => {
+    const badge = document.querySelector('[data-testid="badge"][data-variant="environment"]');
+    return { label: badge?.getAttribute('aria-label') ?? null, text: badge?.textContent?.trim() ?? null };
+  });
+  assert(
+    badgeLabel.label?.startsWith('Environment:'),
+    `Badge prefixes the accessible name with its vocabulary (${badgeLabel.label})`
+  );
+
+  // ---- Button tap targets -----------------------------------------------
+  const buttons = await page.evaluate(() =>
+    Array.from(
+      document.querySelectorAll('[data-testid="button"], [data-testid="filter-reset"]')
+    ).map((el) => {
+      const rect = el.getBoundingClientRect();
+      return {
+        id: el.getAttribute('data-testid'),
+        variant: el.getAttribute('data-variant') ?? 'ghost',
+        w: Math.round(rect.width),
+        h: Math.round(rect.height)
+      };
+    })
+  );
+  assert(buttons.length >= 2, `Dashboard renders ${buttons.length} Button primitives across the shell and toolbar`);
+  assert(
+    buttons.every((b) => b.w >= 44 && b.h >= 44),
+    'Every Button clears the 44x44 minimum tap target',
+    JSON.stringify(buttons)
+  );
+
+  // ---- Card slots ---------------------------------------------------------
+  const card = await page.evaluate(() => {
+    const section = document.querySelector('[data-testid="card"]');
+    return {
+      hasTitle: Boolean(section?.querySelector('[data-testid="card-title"]')),
+      hasToolbar: Boolean(section?.querySelector('[data-testid="card-body"]')),
+      border: getComputedStyle(section).borderTopWidth
+    };
+  });
+  assert(card.hasTitle, 'Card renders its header title slot');
+  assert(card.border === '1px', `Card paints the 1px CloudWatch panel border (${card.border})`);
+
+  // ---- ProgressBar threshold colour shift ---------------------------------
+  const bars = await page.evaluate(() =>
+    Array.from(document.querySelectorAll('[data-testid="progress-bar"]')).map((el) => ({
+      tone: el.getAttribute('data-tone'),
+      value: Number(el.querySelector('[role="progressbar"]')?.getAttribute('aria-valuenow')),
+      role: el.querySelector('[role="progressbar"]')?.getAttribute('role'),
+      max: el.querySelector('[role="progressbar"]')?.getAttribute('aria-valuemax')
+    }))
+  );
+  assert(bars.length >= 2, `ProgressBar rendered ${bars.length} instances`);
+  assert(bars.every((b) => b.role === 'progressbar' && b.max === '100'), 'ProgressBar exposes an ARIA progressbar role with a 0-100 range');
+  assert(
+    bars.every((b) => {
+      const expected = b.value >= 90 ? 'rose' : b.value >= 75 ? 'amber' : 'emerald';
+      return b.tone === expected;
+    }),
+    'ProgressBar shifts emerald -> amber -> rose at the 75% and 90% thresholds',
+    JSON.stringify(bars)
+  );
+
+  // ---- Container-query table ---------------------------------------------
+  const atDesktop = await page.evaluate(() => ({
+    grid: getComputedStyle(document.querySelector('[data-testid="table-grid-wrapper"]')).display,
+    cards: getComputedStyle(document.querySelector('[data-testid="table-cards"]')).display,
+    rows: document.querySelectorAll('[data-testid="table-row"]').length
+  }));
+  assertEqual(atDesktop.grid, 'block', 'Above 768px the Table renders the multi-column grid');
+  assertEqual(atDesktop.cards, 'none', 'Above 768px the Table hides the stacked card view');
+  assertEqual(atDesktop.rows, 12, 'The grid renders all 12 fleet rows');
+
+  await page.setViewportSize({ width: 360, height: 780 });
+  await page.waitForTimeout(300);
+  const atMobile = await page.evaluate(() => ({
+    grid: getComputedStyle(document.querySelector('[data-testid="table-grid-wrapper"]')).display,
+    cards: getComputedStyle(document.querySelector('[data-testid="table-cards"]')).display,
+    cards_: document.querySelectorAll('[data-testid="table-card"]').length
+  }));
+  assertEqual(atMobile.grid, 'none', 'Below 768px the Table hides the multi-column grid');
+  assertEqual(atMobile.cards, 'flex', 'Below 768px the Table renders the stacked card view');
+  assertEqual(atMobile.cards_, 12, 'The stacked view renders one card per fleet row');
+
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.waitForTimeout(300);
+
+  // ---- Input accessibility -----------------------------------------------
+  const input = await page.evaluate(() => {
+    const el = document.querySelector('[data-testid="server-search"]');
+    if (!el) return null;
+    const label = document.querySelector(`label[for="${el.id}"]`);
+    return { type: el.getAttribute('type'), label: label?.textContent?.trim() ?? null, describedBy: el.getAttribute('aria-describedby') };
+  });
+  assertEqual(input?.type, 'search', 'Input renders a native search field');
+  assertEqual(input?.label, 'Search instances', 'Input is programmatically associated with its visible label');
+
+  // ---- Select -------------------------------------------------------------
+  const select = await page.evaluate(() => {
+    const el = document.querySelector('[data-testid="region-filter"]');
+    if (!el) return null;
+    const label = document.querySelector(`label[for="${el.id}"]`);
+    return {
+      options: Array.from(el.options).map((o) => o.value),
+      label: label?.textContent?.trim() ?? null
+    };
+  });
+  assertEqual(select?.label, 'Region', 'Select is programmatically associated with its visible label');
+  assertEqual(select?.options[0], 'all', 'Select exposes the "all regions" sentinel option first');
+  assertEqual(select?.options.length, 10, `Select lists all 9 regions plus the sentinel (${select?.options.length})`);
+
+  // ---- Tooltip ------------------------------------------------------------
+  const trigger = page.locator('[data-testid="tooltip-trigger"]').first();
+  assert((await trigger.count()) > 0, 'Tooltip trigger is rendered in the summary grid');
+  await trigger.click();
+  await page.waitForTimeout(200);
+  const tooltip = await page.evaluate(() => {
+    const el = document.querySelector('[data-testid="tooltip"]');
+    const triggerEl = document.querySelector('[data-testid="tooltip-trigger"]');
+    if (!el) return null;
+    const rect = el.getBoundingClientRect();
+    return {
+      role: el.getAttribute('role'),
+      describedBy: triggerEl?.getAttribute('aria-describedby'),
+      expanded: triggerEl?.getAttribute('aria-expanded'),
+      insideViewport: rect.left >= 0 && rect.right <= window.innerWidth && rect.top >= 0,
+      placement: el.getAttribute('data-placement')
+    };
+  });
+  assertEqual(tooltip?.role, 'tooltip', 'Tooltip renders with role="tooltip" on activation');
+  assert(tooltip?.expanded === 'true', 'Tooltip trigger reports aria-expanded="true" while open');
+  assert(Boolean(tooltip?.describedBy) && tooltip.describedBy !== 'null', 'Tooltip trigger links the bubble with aria-describedby');
+  assert(tooltip?.insideViewport === true, 'Tooltip bubble stays inside the viewport bounds');
+  assert(tooltip?.placement === 'top', `Tooltip auto-flips above the trigger when there is room (${tooltip?.placement})`);
+
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(200);
+  assertEqual(
+    await page.locator('[data-testid="tooltip"]').count(),
+    0,
+    'Tooltip dismisses on the Escape key'
+  );
+
+  // ---- Empty state --------------------------------------------------------
+  await page.locator('[data-testid="server-search"]').fill('zzzz-no-such-instance');
+  await page.waitForTimeout(250);
+  const emptyState = await page.evaluate(() => {
+    const el = document.querySelector('[data-testid="table-empty"]');
+    return { present: Boolean(el), text: el?.textContent?.replace(/\s+/g, ' ').trim() ?? null };
+  });
+  assert(emptyState.present, 'Table renders an explicit empty state when nothing matches');
+  assert(
+    emptyState.text?.includes('No instances match the active filters'),
+    `Empty state explains the situation and the remedy (${emptyState.text})`
+  );
+  await page.locator('[data-testid="server-search"]').fill('');
+  await page.waitForTimeout(250);
+
+  // ---- Reset button state -------------------------------------------------
+  const resetDisabled = await page
+    .locator('[data-testid="filter-reset"]')
+    .evaluate((el) => el.disabled);
+  assertEqual(resetDisabled, true, 'Reset button is disabled while no filter is active');
+  await page.locator('[data-testid="server-search"]').fill('postgres');
+  await page.waitForTimeout(200);
+  const resetEnabled = await page
+    .locator('[data-testid="filter-reset"]')
+    .evaluate((el) => !el.disabled);
+  assertEqual(resetEnabled, true, 'Reset button enables once a filter is active');
+  await page.locator('[data-testid="filter-reset"]').click();
+  await page.waitForTimeout(250);
+  assertEqual(
+    await countVisible(page, '[data-testid="server-row-name"]'),
+    12,
+    'Reset restores the full fleet'
+  );
 }
 
 /* ------------------------------------------------------------------ */
@@ -496,7 +752,7 @@ async function checkPhase4(page) {
   if (filterResults.hasSearch) {
     await page.locator('[data-testid="server-search"]').fill('postgres');
     await page.waitForTimeout(200);
-    const names = await page.locator('[data-testid="server-row-name"]').allTextContents();
+    const names = await textsOfVisible(page, '[data-testid="server-row-name"]');
     assert(names.length === 1 && names[0].includes('postgres'), `Search narrows the grid to the matching instance (${names.join(', ')})`);
 
     await page.locator('[data-testid="server-search"]').fill('');
@@ -504,7 +760,7 @@ async function checkPhase4(page) {
 
     await page.locator('[data-testid="status-filter-critical"]').click();
     await page.waitForTimeout(200);
-    const statuses = await page.locator('[data-testid="server-row-status"]').allTextContents();
+    const statuses = await textsOfVisible(page, '[data-testid="server-row-status"]');
     assert(
       statuses.every((s) => s.trim().toLowerCase() === 'critical'),
       `Status pill filter returns only matching rows (${statuses.join(', ') || 'none'})`
@@ -512,14 +768,14 @@ async function checkPhase4(page) {
 
     await page.locator('[data-testid="status-filter-all"]').click();
     await page.waitForTimeout(200);
-    assert((await page.locator('[data-testid="server-row-name"]').count()) === 12, 'Resetting the status filter restores all 12 rows');
+    assert((await countVisible(page, '[data-testid="server-row-name"]')) === 12, 'Resetting the status filter restores all 12 rows');
   }
 
   const sortToggle = page.locator('[data-testid="sort-cpu"]');
   if (await sortToggle.count()) {
     await sortToggle.click();
     await page.waitForTimeout(200);
-    const cpuValues = await page.locator('[data-testid="cpu-value"]').allTextContents();
+    const cpuValues = await textsOfVisible(page, '[data-testid="cpu-value"]');
     const parsed = cpuValues.map((v) => Number.parseFloat(v)).filter((n) => Number.isFinite(n));
     const sortedDesc = [...parsed].sort((a, b) => b - a);
     assertEqual(
@@ -695,7 +951,7 @@ async function checkPhase5(page, diagnostics) {
     await page.locator('[data-testid="asset-submit"]').click();
     await page.waitForTimeout(400);
     assertEqual(
-      await page.locator('[data-testid="server-row-name"]').count(),
+      await countVisible(page, '[data-testid="server-row-name"]'),
       13,
       'Creating a new asset appends a 13th row to the fleet table'
     );
@@ -754,7 +1010,16 @@ async function main() {
   await browser.close();
 
   const failures = results.filter((r) => !r.ok);
-  const warnings = diagnostics.filter((entry) => !entry.startsWith('[pageerror]'));
+  const hardFailures = failures.length;
+  const overlays = diagnostics.filter((entry) => entry.startsWith('[vite-overlay]'));
+  const warnings = diagnostics.filter(
+    (entry) => !entry.startsWith('[pageerror]') && !entry.startsWith('[vite-overlay]')
+  );
+
+  if (overlays.length) {
+    record(false, 'No Vite compile/runtime error overlay was raised', [...new Set(overlays)].join('\n'));
+  }
+
   console.log(`\n\x1b[1mSummary\x1b[0m: ${results.length - failures.length}/${results.length} checks passed`);
   if (warnings.length) {
     console.log(`\n\x1b[33mConsole diagnostics (${warnings.length}):\x1b[0m`);
@@ -764,7 +1029,7 @@ async function main() {
     console.log(`\n\x1b[31mFailures (${failures.length}):\x1b[0m`);
     for (const failure of failures) console.log(`  - [${failure.check}] ${failure.message}`);
     process.exitCode = 1;
-  } else {
+  } else if (hardFailures === 0) {
     console.log('\x1b[32mAll checks passed.\x1b[0m');
   }
 }
