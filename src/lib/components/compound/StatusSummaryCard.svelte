@@ -71,7 +71,7 @@
 
     <div class="min-w-0 flex-1">
       <div class="flex items-start justify-between gap-1">
-        <p class="min-w-0 flex-1 truncate text-[11px] font-medium text-cw-muted">{label}</p>
+        <p class="min-w-0 flex-1 text-[11px] font-medium leading-snug text-cw-muted">{label}</p>
         {#if trailing}
           <span class="tnum shrink-0 font-mono text-[11px] text-cw-faint">{trailing}</span>
         {/if}
@@ -83,7 +83,7 @@
       <p class="tnum mt-1 font-mono text-2xl font-semibold {VALUE_TONE[tone]}">{value}</p>
 
       {#if detail}
-        <p class="mt-0.5 truncate text-[11px] text-cw-muted">{detail}</p>
+        <p class="mt-0.5 text-[11px] leading-snug text-cw-muted">{detail}</p>
       {/if}
 
       {#if progress !== undefined}

@@ -134,8 +134,24 @@ async function waitForFleetReady(page) {
   );
 }
 
-/** Detect elements whose content spills outside their own box. */
-const OVERFLOW_PROBE = `() => {
+/**
+ * Detect elements whose content spills outside the viewport.
+ *
+ * Content inside a deliberate horizontal scroll container (the filter pill
+ * strips and chart lanes called for by the responsive spec) is exempt: it is
+ * swipe-scrollable by design, and the page itself must not scroll sideways.
+ */
+const OVERFLOW_PROBE = () => {
+  const isInsideHorizontalScroller = (el) => {
+    let node = el.parentElement;
+    while (node && node !== document.body) {
+      const overflowX = getComputedStyle(node).overflowX;
+      if (overflowX === 'auto' || overflowX === 'scroll') return true;
+      node = node.parentElement;
+    }
+    return false;
+  };
+
   const offenders = [];
   const documentWidth = document.documentElement.clientWidth;
   for (const el of document.querySelectorAll('body *')) {
@@ -144,6 +160,7 @@ const OVERFLOW_PROBE = `() => {
     const rect = el.getBoundingClientRect();
     if (rect.width === 0 || rect.height === 0) continue;
     if (rect.right > documentWidth + 1.5 || rect.left < -1.5) {
+      if (isInsideHorizontalScroller(el)) continue;
       offenders.push({
         tag: el.tagName.toLowerCase(),
         cls: (el.getAttribute('class') ?? '').slice(0, 90),
@@ -154,12 +171,13 @@ const OVERFLOW_PROBE = `() => {
     }
   }
   return offenders.slice(0, 8);
-}`;
+};
 
 /** Detect interactive targets smaller than the 44px minimum tap target. */
-const TAP_TARGET_PROBE = `() => {
+const TAP_TARGET_PROBE = () => {
   const small = [];
-  const selector = 'a[href], button, input, select, textarea, [role="button"], [role="tab"], [tabindex]:not([tabindex="-1"])';
+  const selector =
+    'a[href], button, input, select, textarea, [role="button"], [role="tab"], [tabindex]:not([tabindex="-1"])';
   for (const el of document.querySelectorAll(selector)) {
     const style = getComputedStyle(el);
     if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') continue;
@@ -176,17 +194,21 @@ const TAP_TARGET_PROBE = `() => {
     }
   }
   return small.slice(0, 12);
-}`;
+};
 
-/** Check that no text node is visually truncated by an ellipsis or clipping rule. */
-const CLIPPING_PROBE = `() => {
+/** Detect leaf text nodes whose content is clipped by their own box. */
+const CLIPPING_PROBE = () => {
   const clipped = [];
   for (const el of document.querySelectorAll('body *')) {
     if (el.children.length > 0) continue;
+    const rect = el.getBoundingClientRect();
     const text = (el.textContent ?? '').trim();
     if (!text) continue;
     const style = getComputedStyle(el);
     if (style.display === 'none' || style.visibility === 'hidden') continue;
+    // `sr-only` is clipped to a 1px box on purpose to keep it off-screen.
+    if (el.classList.contains('sr-only') || el.closest('.sr-only')) continue;
+    if (rect.width <= 1 || rect.height <= 1) continue;
     const overflowsHorizontally = el.scrollWidth > el.clientWidth + 1;
     const overflowsVertically = el.scrollHeight > el.clientHeight + 1;
     if (overflowsHorizontally || overflowsVertically) {
@@ -201,7 +223,7 @@ const CLIPPING_PROBE = `() => {
     }
   }
   return clipped.slice(0, 12);
-}`;
+};
 
 /* ------------------------------------------------------------------ */
 /* Phase 1 — types, storage, utilities                                 */
@@ -476,7 +498,7 @@ async function checkPhase2(page) {
 
   // ---- Card slots ---------------------------------------------------------
   const card = await page.evaluate(() => {
-    const section = document.querySelector('[data-testid="card"]');
+    const section = document.querySelector('[data-testid="server-list-card"]');
     return {
       hasTitle: Boolean(section?.querySelector('[data-testid="card-title"]')),
       hasToolbar: Boolean(section?.querySelector('[data-testid="card-body"]')),

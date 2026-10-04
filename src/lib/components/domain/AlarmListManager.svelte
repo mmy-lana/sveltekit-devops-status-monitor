@@ -273,7 +273,7 @@
           <Button
             variant="ghost"
             size="sm"
-            class="h-9 px-2"
+            class="h-11 px-3"
             testId={`alarm-toggle-${alarm.id}`}
             onclick={() => void onenable?.(alarm.id, !alarm.enabled)}
           >
@@ -283,7 +283,7 @@
             <Button
               variant="secondary"
               size="sm"
-              class="h-9 px-2"
+              class="h-11 px-3"
               testId={`alarm-ack-${alarm.id}`}
               onclick={() => void onstate?.(alarm.id, 'OK' as AlarmState)}
             >
@@ -293,7 +293,7 @@
           <Button
             variant="ghost"
             size="sm"
-            class="h-9 px-2"
+            class="h-11 px-3"
             testId={`alarm-edit-${alarm.id}`}
             onclick={() => openEdit(alarm)}
           >
@@ -302,7 +302,7 @@
           <Button
             variant="ghost"
             size="sm"
-            class="h-9 px-2 text-cw-rose"
+            class="h-11 px-3 text-cw-rose"
             testId={`alarm-delete-${alarm.id}`}
             onclick={() => void ondelete?.(alarm.id)}
           >

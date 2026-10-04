@@ -4,24 +4,15 @@
   import Badge from '$lib/components/primitives/Badge.svelte';
   import Button from '$lib/components/primitives/Button.svelte';
   import Card from '$lib/components/primitives/Card.svelte';
-  import ProgressBar from '$lib/components/primitives/ProgressBar.svelte';
-  import MetricChart from '$lib/components/compound/MetricChart.svelte';
+  import ServerDetailMetrics from '$lib/components/domain/ServerDetailMetrics.svelte';
   import LogConsole from '$lib/components/compound/LogConsole.svelte';
-  import RefreshRateDropdown from '$lib/components/compound/RefreshRateDropdown.svelte';
   import StatusSummaryCard from '$lib/components/compound/StatusSummaryCard.svelte';
-  import TimeRangeSelector from '$lib/components/compound/TimeRangeSelector.svelte';
+  import RefreshRateDropdown from '$lib/components/compound/RefreshRateDropdown.svelte';
   import { monitorStore } from '$lib/stores/monitorStore.svelte';
   import { db, getLogsForServer } from '$lib/db';
-  import { METRIC_LABELS, METRIC_ORDER } from '$lib/utils/alarmUtils';
   import { describeThreshold } from '$lib/utils/alarmUtils';
-  import { durationForTimeRange, formatBytes, formatRelativeTime } from '$lib/utils/formatting';
-  import type {
-    AlarmRule,
-    LogEntry,
-    MetricSeries,
-    MetricType,
-    TimeRangeValue
-  } from '$lib/types/monitor';
+  import { durationForTimeRange, formatRelativeTime } from '$lib/utils/formatting';
+  import type { AlarmRule, LogEntry, MetricType, TimeRangeValue } from '$lib/types/monitor';
 
   const serverId = $derived(page.params.id ?? '');
 
@@ -31,19 +22,12 @@
   let range = $state<TimeRangeValue>('1h');
   let activeMetric = $state<MetricType>('cpu');
   let secondaryMetric = $state<MetricType>('memory');
-  let series = $state<MetricSeries[]>([]);
+  let series = $state<Awaited<ReturnType<typeof monitorStore.loadMetricSeries>>[]>([]);
   let logs = $state<LogEntry[]>([]);
   let serverAlarms = $state<AlarmRule[]>([]);
   let loadingSeries = $state(true);
   let loadingLogs = $state(true);
   let logsError = $state<string | null>(null);
-
-  const METRIC_TABS = [
-    { key: 'cpu' as MetricType, label: 'CPU' },
-    { key: 'memory' as MetricType, label: 'Memory' },
-    { key: 'disk' as MetricType, label: 'Disk' },
-    { key: 'latency' as MetricType, label: 'Latency' }
-  ];
 
   const serverIncidents = $derived(
     monitorStore.incidents.filter((incident) => incident.serverId === serverId)
@@ -66,11 +50,11 @@
     try {
       const since = Date.now() - durationForTimeRange(range);
       const primary = await monitorStore.loadMetricSeries(serverId, activeMetric, since);
-      const secondary =
+      const comparison =
         secondaryMetric === activeMetric
           ? await monitorStore.loadMetricSeries(serverId, 'networkIn', since)
           : await monitorStore.loadMetricSeries(serverId, secondaryMetric, since);
-      series = [primary, secondary];
+      series = [primary, comparison];
     } finally {
       loadingSeries = false;
     }
@@ -236,102 +220,19 @@
     </div>
 
     <div class="grid gap-4 xl:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
-      <Card
-        title="Telemetry"
-        subtitle="Dual-axis utilisation over the selected window"
-        padding="md"
-        testId="telemetry-panel"
-      >
-        {#snippet actions()}
-          <TimeRangeSelector bind:value={range} />
-        {/snippet}
-
-        {#snippet toolbar()}
-          <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-            <div
-              class="scroll-strip"
-              role="tablist"
-              aria-label="Metric"
-              data-testid="metric-tabs"
-            >
-              {#each METRIC_TABS as tab (tab.key)}
-                <button
-                  type="button"
-                  role="tab"
-                  data-testid="metric-tab"
-                  data-metric={tab.key}
-                  aria-selected={activeMetric === tab.key}
-                  tabindex={activeMetric === tab.key ? 0 : -1}
-                  class="h-11 shrink-0 rounded border px-3 text-[12px] font-medium transition-colors {activeMetric ===
-                  tab.key
-                    ? 'border-cw-accent/45 bg-cw-accent/14 text-cw-accent'
-                    : 'border-slate-border-strong text-cw-muted hover:bg-white/5 hover:text-cw-text'}"
-                  onclick={() => selectTab(tab.key)}
-                >
-                  {tab.label}
-                </button>
-              {/each}
-            </div>
-
-            <div class="flex shrink-0 items-center gap-2">
-              <label
-                for="secondary-metric"
-                class="shrink-0 text-[11px] text-cw-muted"
-              >Compare</label>
-              <div class="w-40">
-                <select
-                  id="secondary-metric"
-                  data-testid="secondary-metric"
-                  class="h-11 w-full cursor-pointer rounded border border-slate-border-strong bg-slate-base px-2.5 text-[12px] text-cw-text focus:border-cw-accent focus:outline-none"
-                  value={secondaryMetric}
-                  onchange={(event) =>
-                    (secondaryMetric = event.currentTarget.value as MetricType)}
-                >
-                  {#each METRIC_ORDER.filter((item) => item !== activeMetric) as option (option)}
-                    <option value={option}>{METRIC_LABELS[option]}</option>
-                  {/each}
-                </select>
-              </div>
-            </div>
-          </div>
-        {/snippet}
-
-        {#if loadingSeries}
-          <div
-            class="flex h-[240px] items-center justify-center rounded border border-slate-border bg-slate-base"
-            role="status"
-            aria-busy="true"
-            data-testid="chart-loading"
-          >
-            <span class="font-mono text-[11px] text-cw-muted">Querying telemetry store…</span>
-          </div>
-        {:else}
-          <MetricChart
-            {series}
-            {thresholds}
-            height={240}
-            stacked
-            label={`${METRIC_LABELS[activeMetric]} and ${METRIC_LABELS[secondaryMetric]} over the last ${range}`}
-            formatValue={(item, value) => formatBytes(value)}
-            emptyTitle={`No ${METRIC_LABELS[activeMetric].toLowerCase()} samples in the last ${range}`}
-          />
-
-          <dl class="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
-            {#each series as item (item.metric)}
-              <div class="rounded border border-slate-border bg-slate-base px-3 py-2">
-                <dt class="truncate text-[10px] uppercase tracking-wider text-cw-faint">
-                  {METRIC_LABELS[item.metric]}
-                </dt>
-                <dd class="tnum mt-1 font-mono text-[12px] text-cw-text">
-                  <span class="text-cw-faint">avg</span> {item.average.toFixed(1)}{item.unit === 'Kbps' ? '' : item.unit}
-                  <span class="ml-2 text-cw-faint">p95</span>
-                  {item.p95.toFixed(1)}{item.unit === 'Kbps' ? '' : item.unit}
-                </dd>
-              </div>
-            {/each}
-          </dl>
-        {/if}
-      </Card>
+      <ServerDetailMetrics
+        serverName={server.name}
+        {series}
+        secondarySeries={series[1] ?? null}
+        {thresholds}
+        loading={loadingSeries}
+        {activeMetric}
+        {secondaryMetric}
+        {range}
+        onmetricchange={selectTab}
+        onsecondarychange={(metric) => (secondaryMetric = metric)}
+        onrangechange={(next) => (range = next)}
+      />
 
       <div class="flex flex-col gap-4">
         <Card title="Active alarms" meta={`${serverAlarms.length}`} padding="none" testId="server-alarms">

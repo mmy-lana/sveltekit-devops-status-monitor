@@ -209,7 +209,7 @@
               data-testid={`incident-severity-${severity}`}
               aria-pressed={incident.severity === severity}
               disabled={busy}
-              class="h-9 rounded border px-2.5 font-mono text-[11px] font-semibold transition-colors disabled:opacity-50 {incident.severity ===
+              class="h-11 shrink-0 rounded border px-3 font-mono text-[11px] font-semibold transition-colors disabled:opacity-50 {incident.severity ===
               severity
                 ? 'border-cw-accent/50 bg-cw-accent/14 text-cw-accent'
                 : 'border-slate-border-strong text-cw-muted hover:bg-white/5 hover:text-cw-text'}"

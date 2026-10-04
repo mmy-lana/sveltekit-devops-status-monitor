@@ -65,7 +65,7 @@
       tabindex={option.value === value ? 0 : -1}
       disabled={disabled}
       title={`Show the last ${option.label} of telemetry`}
-      class="h-10 min-w-[44px] rounded px-2.5 font-mono text-[11px] font-medium transition-colors disabled:cursor-not-allowed {option.value ===
+      class="h-11 min-w-[44px] shrink-0 rounded px-2.5 font-mono text-[11px] font-medium transition-colors disabled:cursor-not-allowed {option.value ===
       value
         ? 'bg-cw-accent text-white'
         : 'text-cw-muted hover:bg-white/6 hover:text-cw-text'}"

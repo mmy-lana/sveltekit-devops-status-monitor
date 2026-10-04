@@ -19,6 +19,32 @@
   ] as const;
 
   const pathname = $derived(page.url.pathname);
+
+  /** Trail derived from the route, with the instance name resolved when known. */
+  const breadcrumb = $derived.by(() => {
+    if (pathname === '/') return [{ label: 'Fleet Dashboard', href: '/' }];
+    if (pathname === '/alarms') {
+      return [
+        { label: 'Fleet Dashboard', href: '/' },
+        { label: 'Alarms', href: '/alarms' }
+      ];
+    }
+    if (pathname === '/incidents') {
+      return [
+        { label: 'Fleet Dashboard', href: '/' },
+        { label: 'Incidents', href: '/incidents' }
+      ];
+    }
+    if (pathname.startsWith('/servers/')) {
+      const id = decodeURIComponent(pathname.slice('/servers/'.length));
+      const server = monitorStore.servers.find((item) => item.id === id);
+      return [
+        { label: 'Fleet Dashboard', href: '/' },
+        { label: server?.name ?? id, href: pathname }
+      ];
+    }
+    return [{ label: 'Fleet Dashboard', href: '/' }];
+  });
   const summary = $derived(monitorStore.fleetSummary);
   const fleetTone = $derived(
     summary.criticalCount > 0 ? 'critical' : summary.warningCount > 0 ? 'warning' : 'healthy'
@@ -75,7 +101,7 @@
       <div class="ml-auto flex shrink-0 items-center gap-2">
         <div
           data-testid="fleet-status-pill"
-          class="flex h-9 items-center gap-2 rounded border border-slate-border-strong bg-slate-base px-2.5"
+          class="flex h-11 items-center gap-2 rounded border border-slate-border-strong bg-slate-base px-2.5"
         >
           <span
             class="inline-block h-2 w-2 shrink-0 rounded-full {fleetTone === 'critical'
@@ -94,7 +120,7 @@
           <a
             href="/alarms"
             data-testid="alarm-bell"
-            class="flex h-9 items-center gap-1.5 rounded border border-cw-rose/45 bg-cw-rose/12 px-2.5 font-mono text-[11px] text-cw-rose transition-colors hover:bg-cw-rose/20"
+            class="flex h-11 shrink-0 items-center gap-1.5 rounded border border-cw-rose/45 bg-cw-rose/12 px-3 font-mono text-[11px] text-cw-rose transition-colors hover:bg-cw-rose/20"
           >
             <span class="sr-only">Active alarms:</span>
             <svg viewBox="0 0 16 16" class="h-3.5 w-3.5" fill="currentColor" aria-hidden="true">
@@ -121,6 +147,45 @@
       </div>
     </div>
   </header>
+
+  <nav aria-label="Breadcrumb" data-testid="breadcrumb" class="border-b border-slate-border bg-slate-base/60">
+    <ol class="mx-auto flex w-full max-w-[1600px] items-center gap-1.5 overflow-x-auto px-4 py-2 md:px-6">
+      {#each breadcrumb as crumb, index (crumb.href + crumb.label)}
+        <li class="flex shrink-0 items-center gap-1.5">
+          {#if index > 0}
+            <svg
+              viewBox="0 0 16 16"
+              class="h-3 w-3 shrink-0 text-cw-faint"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.6"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <path d="m6 3 5 5-5 5" />
+            </svg>
+          {/if}
+          {#if index === breadcrumb.length - 1}
+            <span
+              class="flex h-11 shrink-0 items-center px-1.5 text-[12px] font-medium text-cw-text"
+              aria-current="page"
+              data-testid="breadcrumb-current"
+            >
+              {crumb.label}
+            </span>
+          {:else}
+            <a
+              href={crumb.href}
+              class="flex h-11 shrink-0 items-center rounded px-1.5 text-[12px] text-cw-muted transition-colors hover:bg-white/5 hover:text-cw-text"
+            >
+              {crumb.label}
+            </a>
+          {/if}
+        </li>
+      {/each}
+    </ol>
+  </nav>
 
   {#if monitorStore.isLoading}
     <div

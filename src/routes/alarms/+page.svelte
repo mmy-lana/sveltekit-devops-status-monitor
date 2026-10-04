@@ -48,7 +48,7 @@
       label="Awaiting data"
       value={String(monitorStore.alarms.filter((a) => a.state === 'INSUFFICIENT_DATA').length)}
       tone="violet"
-      detail="No evaluation has landed yet"
+      detail="No evaluation recorded yet"
       testId="alarm-summary-pending"
     />
     <StatusSummaryCard

@@ -196,7 +196,7 @@
             type="button"
             data-testid={`log-level-${level}`}
             aria-pressed={activeLevels.includes(level)}
-            class="flex h-9 shrink-0 items-center gap-1.5 rounded border px-2.5 font-mono text-[10px] font-semibold transition-colors {activeLevels.includes(
+            class="flex h-11 shrink-0 items-center gap-1.5 rounded border px-3 font-mono text-[10px] font-semibold transition-colors {activeLevels.includes(
               level
             )
               ? LEVEL_CHIP_ACTIVE[level]
@@ -215,7 +215,7 @@
       <button
         type="button"
         data-testid="log-clear"
-        class="h-9 shrink-0 rounded border border-slate-border-strong px-2.5 font-mono text-[10px] text-cw-muted transition-colors hover:bg-white/5 hover:text-cw-text"
+        class="h-11 shrink-0 rounded border border-slate-border-strong px-3 font-mono text-[10px] text-cw-muted transition-colors hover:bg-white/5 hover:text-cw-text"
         onclick={clearFilters}
         disabled={compiled.pattern === null && matchesAll}
         title="Clear the query and level filters"

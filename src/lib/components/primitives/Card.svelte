@@ -78,18 +78,18 @@
         ? 'sticky top-0 z-10 bg-slate-card'
         : ''}"
     >
-      <div class="min-w-0 flex-1">
+      <div class="min-w-0 flex-[1_1_11rem]">
         {#if title}
           <svelte:element
             this={headingTag}
-            class="truncate text-[13px] font-semibold tracking-tight text-cw-text"
+            class="text-[13px] font-semibold leading-snug tracking-tight text-cw-text"
             data-testid="card-title"
           >
             {title}
           </svelte:element>
         {/if}
         {#if subtitle}
-          <p class="mt-0.5 truncate text-[11px] text-cw-muted">{subtitle}</p>
+          <p class="mt-0.5 text-[11px] leading-snug text-cw-muted">{subtitle}</p>
         {/if}
       </div>
 

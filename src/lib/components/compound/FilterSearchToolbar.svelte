@@ -197,7 +197,7 @@
     </div>
 
     <Button
-      variant="ghost"
+      variant="icon"
       size="md"
       testId="sort-direction"
       ariaLabel={sortDirection === 'asc' ? 'Sorted ascending, activate to sort descending' : 'Sorted descending, activate to sort ascending'}
