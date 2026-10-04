@@ -9,7 +9,13 @@
   import StatusSummaryCard from '$lib/components/compound/StatusSummaryCard.svelte';
   import RefreshRateDropdown from '$lib/components/compound/RefreshRateDropdown.svelte';
   import FilterSearchToolbar from '$lib/components/compound/FilterSearchToolbar.svelte';
+  import AssetFormModal from '$lib/components/domain/AssetFormModal.svelte';
+  import Button from '$lib/components/primitives/Button.svelte';
+  import { goto } from '$app/navigation';
   import type { ServerAsset } from '$lib/types/monitor';
+
+  let assetFormOpen = $state(false);
+  let editingServer = $state<ServerAsset | null>(null);
 
   const summary = $derived(monitorStore.fleetSummary);
   const filteredServers = $derived(
@@ -36,7 +42,28 @@
         Live status, utilization telemetry and alarm state across every monitored instance.
       </p>
     </div>
+    <Button
+      variant="primary"
+      size="md"
+      testId="asset-create"
+      onclick={() => {
+        editingServer = null;
+        assetFormOpen = true;
+      }}
+    >
+      Register instance
+    </Button>
   </div>
+
+  {#if monitorStore.error}
+    <p
+      class="rounded border border-cw-rose/40 bg-cw-rose/10 px-3 py-2 text-[11px] text-cw-rose"
+      role="alert"
+      data-testid="store-error"
+    >
+      {monitorStore.error}
+    </p>
+  {/if}
 
   <div class="grid grid-cols-[repeat(auto-fill,minmax(min(160px,100%),1fr))] gap-3">
     <StatusSummaryCard
@@ -143,6 +170,22 @@
               {server.hostname} · {server.ipAddress}
             </span>
           </div>
+          <div class="mt-1 flex gap-1.5">
+            <Button
+              variant="ghost"
+              size="sm"
+              testId={`asset-edit-${server.id}`}
+              class="h-9 px-2"
+              onclick={(event: MouseEvent) => {
+                event.preventDefault();
+                event.stopPropagation();
+                editingServer = server;
+                assetFormOpen = true;
+              }}
+            >
+              Edit
+            </Button>
+          </div>
         {:else if column.key === 'region'}
           <div class="min-w-0">
             <span class="block truncate font-mono text-[11px] text-cw-text">{server.region}</span>
@@ -210,3 +253,32 @@
     </Table>
   </Card>
 </div>
+
+<AssetFormModal
+  open={assetFormOpen}
+  server={editingServer}
+  regions={[...new Set(monitorStore.servers.map((item) => item.region))].sort()}
+  existingNames={monitorStore.servers.map((item) => item.name)}
+  onclose={() => {
+    assetFormOpen = false;
+    editingServer = null;
+  }}
+  oncreate={async (draft) => {
+    const created = await monitorStore.createServer(draft);
+    assetFormOpen = false;
+    editingServer = null;
+    await goto(`/servers/${created.id}`);
+  }}
+  onupdate={async (draft) => {
+    if (!editingServer) return;
+    await monitorStore.updateServer(editingServer.id, draft);
+    assetFormOpen = false;
+    editingServer = null;
+  }}
+  ondelete={async () => {
+    if (!editingServer) return;
+    await monitorStore.deleteServer(editingServer.id);
+    assetFormOpen = false;
+    editingServer = null;
+  }}
+/>

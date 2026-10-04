@@ -96,6 +96,19 @@
     return counts;
   });
 
+  /**
+   * Selecting the active column again flips the direction; picking a new column
+   * starts from the most useful default (names ascending, metrics descending).
+   */
+  function selectSort(key: SortKey): void {
+    if (sortBy === key) {
+      sortDirection = sortDirection === 'asc' ? 'desc' : 'asc';
+    } else {
+      sortBy = key;
+      sortDirection = key === 'name' ? 'asc' : 'desc';
+    }
+  }
+
   const activeFilterCount = $derived(
     (status === 'all' ? 0 : 1) + (region === 'all' ? 0 : 1) + (searchQuery.trim().length > 0 ? 1 : 0)
   );
@@ -137,7 +150,14 @@
     </div>
 
     <div class="sm:w-48">
-      <Select label="Sort by" name="sort-by" testId="sort-select" options={sortOptions} bind:value={sortBy} />
+      <Select
+        label="Sort by"
+        name="sort-by"
+        testId="sort-select"
+        options={sortOptions}
+        value={sortBy}
+        onchange={(event) => selectSort(event.currentTarget.value as SortKey)}
+      />
     </div>
 
     {#if children}

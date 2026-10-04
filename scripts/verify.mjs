@@ -872,95 +872,442 @@ async function checkPhase3(page) {
 async function checkPhase4(page) {
   section('Phase 4 · Engine & Reactive State');
 
-  const state = await page.evaluate(() => {
-    const telemetryCell = document.querySelector('[data-testid="cpu-value"]');
+  /* ---- alarm evaluation semantics (pure engine, run in-browser) ---- */
+  const engine = await page.evaluate(async () => {
+    const engine = await import('/src/lib/engine/alarmEvaluator.ts');
+    const base = {
+      id: 'r1',
+      serverId: 'srv-a',
+      name: 'CPU high',
+      metric: 'cpu',
+      operator: 'GT',
+      threshold: 90,
+      evaluationPeriods: 2,
+      periodSeconds: 10,
+      state: 'OK',
+      enabled: true,
+      consecutiveBreaches: 0,
+      lastEvaluatedAt: 0,
+      lastStateChangeAt: 0,
+      createdAt: 0
+    };
+    const sample = (cpu) => ({
+      timestamp: 1,
+      cpuUsage: cpu,
+      memoryUsage: 40,
+      diskUsage: 40,
+      networkInKbps: 100,
+      networkOutKbps: 100,
+      latencyMs: 10
+    });
+
+    const one = engine.evaluateRule(base, sample(95), 1000);
+    const two = engine.evaluateRule(one.rule, sample(96), 2000);
+    const recovered = engine.evaluateRule(two.rule, sample(20), 3000);
+
+    const batch = engine.evaluateRules([base, { ...base, id: 'r2', serverId: 'srv-b' }], 'srv-a', sample(95), 1000);
+    const disabled = engine.evaluateRule({ ...base, enabled: false }, sample(99), 1000);
+    const fleet = engine.evaluateRules([{ ...base, serverId: 'all' }], 'srv-zzz', sample(10), 1000);
+
+    const incident = engine.incidentFromAlarm(base, {
+      id: 'srv-a',
+      name: 'api-01',
+      hostname: 'api-01',
+      ipAddress: '10.0.0.1',
+      region: 'us-east-1',
+      availabilityZone: 'us-east-1a',
+      environment: 'production',
+      status: 'critical',
+      tags: {},
+      specs: { cpuCores: 2, memoryGb: 4, diskGb: 20, architecture: 'x86_64' },
+      lastHeartbeat: 0,
+      createdAt: 0,
+      updatedAt: 0
+    }, 'srv-a', 130, 1000);
+
+    const resolved = {
+      ...incident,
+      resolvedAt: incident.startedAt + 900_000
+    };
+
     return {
-      cpu: telemetryCell ? telemetryCell.textContent : null
+      singleBreachState: one.rule.state,
+      singleBreachStreak: one.rule.consecutiveBreaches,
+      singleTriggered: one.triggered,
+      doubleState: two.rule.state,
+      doubleTriggered: two.triggered,
+      doubleStateChanged: two.stateChanged,
+      recoveredState: recovered.rule.state,
+      recoveredStreak: recovered.rule.consecutiveBreaches,
+      recoveredLastChange: recovered.rule.lastStateChangeAt,
+      lastEvaluatedMoves: recovered.rule.lastEvaluatedAt,
+      immutable: one.rule !== base && base.consecutiveBreaches === 0,
+      batchEvaluated: batch.evaluations.length,
+      batchTriggered: batch.triggered.length,
+      disabledEvaluated: disabled.evaluations === undefined ? 0 : disabled.rule.state,
+      fleetScopeApplied: fleet.evaluations.length,
+      incidentSeverity: incident.severity,
+      incidentStatus: incident.status,
+      incidentTimeline: incident.timeline.length,
+      incidentAuthor: incident.timeline[0]?.author,
+      mttr: engine.meanTimeToResolve([resolved, incident]),
+      mttrEmpty: engine.meanTimeToResolve([incident]),
+      nextStatuses: engine.nextIncidentStatuses('open'),
+      terminal: engine.isTerminalStatus('resolved'),
+      badThreshold: engine.validateThreshold('cpu', 150),
+      okThreshold: engine.validateThreshold('cpu', 85)
     };
   });
-  assert(state.cpu !== null, 'Monitor store publishes live CPU telemetry into the DOM');
 
-  const alarmState = await page.evaluate(() => {
-    const rows = Array.from(document.querySelectorAll('[data-testid="alarm-row"]'));
-    return rows.map((row) => ({
-      name: row.querySelector('[data-field="name"]')?.textContent?.trim(),
-      state: row.querySelector('[data-field="state"]')?.textContent?.trim()
-    }));
-  });
-  assert(alarmState.length >= 6, `Alarm manager lists every seeded rule (${alarmState.length} rows)`);
-  assert(
-    alarmState.every((row) => ['OK', 'ALARM', 'INSUFFICIENT_DATA'].includes(row.state ?? '')),
-    'Every alarm row reports a valid AlarmState'
+  assertEqual(engine.singleBreachState, 'OK', 'A single breaching period does not latch the rule into ALARM');
+  assertEqual(engine.singleBreachStreak, 1, 'The breach streak counter increments per breaching period');
+  assertEqual(engine.singleTriggered, false, 'A rule below its evaluation window does not trigger an incident');
+  assertEqual(engine.doubleState, 'ALARM', 'Reaching evaluationPeriods latches the rule into ALARM');
+  assertEqual(engine.doubleTriggered, true, 'Latching reports the transition so an incident can be opened');
+  assertEqual(engine.doubleStateChanged, true, 'The evaluator reports that the state changed');
+  assertEqual(engine.recoveredState, 'OK', 'A non-breaching period clears the rule back to OK');
+  assertEqual(engine.recoveredStreak, 0, 'The breach streak resets once the metric recovers');
+  assertEqual(engine.recoveredLastChange, 3000, 'lastStateChangeAt only moves on an actual transition');
+  assertEqual(engine.lastEvaluatedMoves, 3000, 'lastEvaluatedAt advances on every evaluation');
+  assertEqual(engine.immutable, true, 'evaluateRule returns a new object and never mutates the input rule');
+  assertEqual(engine.batchEvaluated, 1, 'Batch evaluation skips rules bound to a different host');
+  assertEqual(engine.fleetScopeApplied, 1, 'Fleet-scoped rules are evaluated against every host');
+  assertEqual(engine.incidentSeverity, 'SEV-1', 'Breaches beyond 125% of threshold open a SEV-1 incident');
+  assertEqual(engine.incidentStatus, 'open', 'A newly opened incident starts in the open state');
+  assertEqual(engine.incidentTimeline, 1, 'The new incident timeline starts with the detection event');
+  assertEqual(engine.incidentAuthor, 'Automated Monitor', 'The detection event is attributed to the automated monitor');
+  assertEqual(
+    engine.mttr,
+    900000,
+    'Mean time to resolve averages only the incidents that were resolved, ignoring the unresolved one'
+  );
+  assertEqual(engine.mttrEmpty, null, 'Mean time to resolve is null when nothing has been resolved');
+  assertEqual(
+    JSON.stringify(engine.nextStatuses),
+    JSON.stringify(['investigating', 'mitigated', 'resolved']),
+    'Only forward lifecycle transitions are offered'
+  );
+  assertEqual(engine.terminal, true, 'resolved is a terminal incident status');
+  assertEqual(engine.badThreshold, 'Percentage metrics cannot exceed 100', 'Threshold validation rejects impossible percentages');
+  assertEqual(engine.okThreshold, null, 'Threshold validation accepts a sane percentage');
+
+  /* ---- live store behaviour on the fleet table ---- */
+  await page.goto(`${BASE_URL}/`, { waitUntil: 'networkidle' });
+  await waitForFleetReady(page);
+  await page.waitForTimeout(400);
+
+  // Scope to an online host: drained and powered-down instances never report.
+  const onlineRow = page.locator('[data-testid="table-row"]', { hasText: 'prod-use1-api-gw-01' });
+  const cpuCell = onlineRow.locator('[data-testid="cpu-value"]').first();
+  const before = ((await cpuCell.textContent()) ?? '').trim();
+  await page.evaluate(() => document.querySelector('[aria-label="Refresh telemetry now"]')?.click());
+  const changed = await page
+    .waitForFunction(
+      (previous) => {
+        const row = Array.from(document.querySelectorAll('[data-testid="table-row"]')).find((r) =>
+          r.textContent?.includes('prod-use1-api-gw-01')
+        );
+        const cell = row?.querySelector('[data-testid="cpu-value"]');
+        return Boolean(cell) && cell.textContent?.trim() !== previous;
+      },
+      before,
+      { timeout: 10_000 }
+    )
+    .then(() => true)
+    .catch(() => false);
+  const after = ((await cpuCell.textContent()) ?? '').trim();
+  assert(changed, `A manual poll cycle produces a new CPU sample (${before} -> ${after})`);
+
+  const offlineRow = page.locator('[data-testid="table-row"]', { hasText: 'dev-sae1-edge-sim-01' });
+  const offlineCpu = await offlineRow.locator('[data-testid="cpu-value"]').first().textContent();
+  await page.evaluate(() => document.querySelector('[aria-label="Refresh telemetry now"]')?.click());
+  await page.waitForTimeout(1200);
+  assertEqual(
+    await offlineRow.locator('[data-testid="cpu-value"]').first().textContent(),
+    offlineCpu,
+    'Offline and maintenance instances are excluded from the telemetry loop'
   );
 
-  // Exercise the rule editor end to end.
-  const createButton = page.locator('[data-testid="alarm-create"]');
-  if (await createButton.count()) {
-    await createButton.click();
-    await page.waitForTimeout(200);
-    assert((await page.locator('[data-testid="alarm-form"]').count()) > 0, 'Alarm rule editor opens');
-    await page.locator('[data-testid="alarm-submit"]').click();
-    await page.waitForTimeout(150);
-    assert(
-      (await page.locator('[data-testid="alarm-form-error"]').count()) > 0,
-      'Alarm rule editor blocks submission with invalid input and surfaces field errors'
-    );
-    await page.locator('[data-testid="alarm-cancel"]').click();
-    await page.waitForTimeout(150);
-  }
+  // Filtering
+  await page.locator('[data-testid="server-search"]').fill('postgres');
+  await page.waitForTimeout(300);
+  const names = await textsOfVisible(page, '[data-testid="server-row-name"]');
+  assertEqual(names.length, 1, 'Search narrows the grid to a single matching instance');
+  assert(names[0]?.includes('postgres'), `The search match is the expected instance (${names.join(', ')})`);
+  await page.locator('[data-testid="server-search"]').fill('');
+  await page.waitForTimeout(250);
 
-  const filterResults = await page.evaluate(async () => {
-    const search = document.querySelector('[data-testid="server-search"]');
-    return { hasSearch: Boolean(search) };
+  await page.locator('[data-testid="status-filter-maintenance"]').click();
+  await page.waitForTimeout(300);
+  const statuses = await textsOfVisible(page, '[data-testid="server-row-status"]');
+  assert(
+    statuses.length > 0 && statuses.every((s) => s.trim().toLowerCase().includes('maintenance')),
+    `Status pill filter returns only maintenance rows (${statuses.join(', ') || 'none'})`
+  );
+  await page.locator('[data-testid="status-filter-offline"]').click();
+  await page.waitForTimeout(300);
+  const offline = await textsOfVisible(page, '[data-testid="server-row-status"]');
+  assert(
+    offline.length > 0 && offline.every((s) => s.trim().toLowerCase().includes('offline')),
+    `Status pill filter returns only offline rows (${offline.join(', ') || 'none'})`
+  );
+  await page.locator('[data-testid="filter-reset"]').click();
+  await page.waitForTimeout(300);
+  assertEqual(
+    await countVisible(page, '[data-testid="server-row-name"]'),
+    12,
+    'Resetting the status filter restores all 12 rows'
+  );
+
+  // Sorting
+  await page.locator('[data-testid="sort-select"]').selectOption('cpu');
+  await page.waitForTimeout(400);
+  const cpuValues = await textsOfVisible(page, '[data-testid="cpu-value"]');
+  const parsed = cpuValues.map((v) => Number.parseFloat(v)).filter((n) => Number.isFinite(n));
+  assertEqual(
+    JSON.stringify(parsed),
+    JSON.stringify([...parsed].sort((a, b) => b - a)),
+    'Selecting the CPU sort column produces a monotonically non-increasing column'
+  );
+
+  await page.locator('[data-testid="sort-direction"]').click();
+  await page.waitForTimeout(400);
+  const ascValues = (await textsOfVisible(page, '[data-testid="cpu-value"]'))
+    .map((v) => Number.parseFloat(v))
+    .filter((n) => Number.isFinite(n));
+  assertEqual(
+    JSON.stringify(ascValues),
+    JSON.stringify([...ascValues].sort((a, b) => a - b)),
+    'Toggling the sort direction reverses the column'
+  );
+
+  /* ---- alarm manager CRUD ---- */
+  await page.goto(`${BASE_URL}/alarms`, { waitUntil: 'networkidle' });
+  await waitForFleetReady(page);
+  await page.waitForTimeout(600);
+
+  const alarmRows = await countVisible(page, '[data-testid="alarm-row"]');
+  assert(alarmRows >= 8, `Alarm manager lists every seeded rule (${alarmRows} rows)`);
+
+  const states = await page.evaluate(() =>
+    Array.from(document.querySelectorAll('[data-field="state"] [data-testid="badge"]')).map(
+      (el) => el.getAttribute('data-value')
+    )
+  );
+  assert(
+    states.length > 0 && states.every((s) => ['OK', 'ALARM', 'INSUFFICIENT_DATA'].includes(s ?? '')),
+    `Every alarm row reports a valid AlarmState (${[...new Set(states)].join(', ')})`
+  );
+
+  await page.locator('[data-testid="alarm-create"]').click();
+  await page.waitForTimeout(300);
+  assert((await page.locator('[data-testid="alarm-form"]').count()) > 0, 'Alarm rule editor opens');
+
+  await page.locator('[data-testid="alarm-submit"]').click();
+  await page.waitForTimeout(300);
+  assert(
+    (await page.locator('[data-testid="alarm-name"][data-error="true"]').count()) > 0,
+    'Alarm editor rejects an empty rule name and marks the field'
+  );
+  assert(
+    (await page.locator('[data-testid="alarm-form"] [data-error="true"]').count()) > 0,
+    'Alarm editor surfaces validation errors instead of saving an invalid rule'
+  );
+
+  await page.locator('[data-testid="alarm-name"]').fill('Verify Harness CPU Guard');
+  await page.locator('[data-testid="alarm-scope"]').selectOption('all');
+  await page.locator('[data-testid="alarm-metric"]').selectOption('cpu');
+  await page.locator('[data-testid="alarm-threshold"]').fill('150');
+  await page.locator('[data-testid="alarm-submit"]').click();
+  await page.waitForTimeout(300);
+  assert(
+    (await page.locator('[data-testid="alarm-threshold"][data-error="true"]').count()) > 0,
+    'Alarm editor rejects a percentage threshold above 100 for a CPU rule'
+  );
+
+  await page.locator('[data-testid="alarm-threshold"]').fill('92');
+  await page.locator('[data-testid="alarm-submit"]').click();
+  await page.waitForTimeout(700);
+  assertEqual(
+    await page.locator('[data-testid="alarm-form"]').count(),
+    0,
+    'A valid alarm draft closes the editor'
+  );
+  assertEqual(
+    await countVisible(page, '[data-testid="alarm-row"]'),
+    alarmRows + 1,
+    'Creating a rule appends it to the fleet alarm list'
+  );
+
+  const createdId = await page.evaluate(() => {
+    const rows = Array.from(document.querySelectorAll('[data-testid="alarm-row"]'));
+    const match = rows.find((row) =>
+      row.querySelector('[data-field="name"]')?.textContent?.includes('Verify Harness CPU Guard')
+    );
+    const container = match?.closest('tr');
+    const buttons = Array.from(container?.querySelectorAll('button') ?? []);
+    const remove = buttons.find((b) => (b.getAttribute('data-testid') ?? '').startsWith('alarm-delete-'));
+    return remove?.getAttribute('data-testid') ?? null;
   });
-  assert(filterResults.hasSearch, 'FilterSearchToolbar exposes a labelled search input');
-
-  if (filterResults.hasSearch) {
-    await page.locator('[data-testid="server-search"]').fill('postgres');
-    await page.waitForTimeout(200);
-    const names = await textsOfVisible(page, '[data-testid="server-row-name"]');
-    assert(names.length === 1 && names[0].includes('postgres'), `Search narrows the grid to the matching instance (${names.join(', ')})`);
-
-    await page.locator('[data-testid="server-search"]').fill('');
-    await page.waitForTimeout(150);
-
-    await page.locator('[data-testid="status-filter-critical"]').click();
-    await page.waitForTimeout(200);
-    const statuses = await textsOfVisible(page, '[data-testid="server-row-status"]');
-    assert(
-      statuses.every((s) => s.trim().toLowerCase() === 'critical'),
-      `Status pill filter returns only matching rows (${statuses.join(', ') || 'none'})`
-    );
-
-    await page.locator('[data-testid="status-filter-all"]').click();
-    await page.waitForTimeout(200);
-    assert((await countVisible(page, '[data-testid="server-row-name"]')) === 12, 'Resetting the status filter restores all 12 rows');
-  }
-
-  const sortToggle = page.locator('[data-testid="sort-cpu"]');
-  if (await sortToggle.count()) {
-    await sortToggle.click();
-    await page.waitForTimeout(200);
-    const cpuValues = await textsOfVisible(page, '[data-testid="cpu-value"]');
-    const parsed = cpuValues.map((v) => Number.parseFloat(v)).filter((n) => Number.isFinite(n));
-    const sortedDesc = [...parsed].sort((a, b) => b - a);
+  assert(Boolean(createdId), 'The newly created rule exposes management controls');
+  if (createdId) {
+    const ruleId = createdId.replace('alarm-delete-', '');
+    await page.locator(`[data-testid="alarm-toggle-${ruleId}"]`).first().click();
+    await page.waitForTimeout(500);
     assertEqual(
-      JSON.stringify(parsed),
-      JSON.stringify(sortedDesc),
-      'Sorting by CPU descending produces a monotonically non-increasing column'
+      (await textsOfVisible(page, '[data-testid="alarm-stat-disabled"]'))[0],
+      '2',
+      'Disabling a rule moves it into the disabled counter'
     );
-    await sortToggle.click();
-    await page.waitForTimeout(150);
+    await page.locator(`[data-testid="alarm-toggle-${ruleId}"]`).first().click();
+    await page.waitForTimeout(500);
+    await page.locator(`[data-testid="alarm-delete-${ruleId}"]`).first().click();
+    await page.waitForTimeout(600);
+    assertEqual(
+      await countVisible(page, '[data-testid="alarm-row"]'),
+      alarmRows,
+      'Deleting a rule removes it from the list'
+    );
   }
 
-  // Incident timeline drawer: bottom sheet under 640px, sidebar above.
-  const drawer = page.locator('[data-testid="incident-drawer"]');
-  if (await drawer.count()) {
-    const box = await drawer.boundingBox();
-    assert(Boolean(box), 'Incident timeline drawer has a measurable box');
+  /* ---- asset form modal ---- */
+  await page.goto(`${BASE_URL}/`, { waitUntil: 'networkidle' });
+  await waitForFleetReady(page);
+  await page.waitForTimeout(500);
+
+  await page.locator('[data-testid="asset-create"]').click();
+  await page.waitForTimeout(350);
+  assert((await page.locator('[data-testid="asset-form"]').count()) > 0, 'Asset form modal opens');
+
+  await page.locator('[data-testid="asset-submit"]').click();
+  await page.waitForTimeout(350);
+  assert(
+    (await page.locator('[data-testid="asset-form-error"]').count()) > 0,
+    'Asset form blocks submission and summarises the validation errors'
+  );
+  assert(
+    (await page.locator('[data-testid="asset-name"][data-error="true"]').count()) > 0,
+    'Asset form marks the invalid name field'
+  );
+
+  await page.locator('[data-testid="asset-name"]').fill('prod use1 edge#13');
+  await page.locator('[data-testid="asset-ip"]').fill('999.1.1.1');
+  await page.locator('[data-testid="asset-region"]').fill('us-east-1');
+  await page.locator('[data-testid="asset-az"]').fill('us-east-1a');
+  await page.locator('[data-testid="asset-submit"]').click();
+  await page.waitForTimeout(350);
+  assert(
+    (await page.locator('[data-testid="asset-name"][data-error="true"]').count()) > 0,
+    'Asset form rejects names containing spaces and punctuation'
+  );
+  assert(
+    (await page.locator('[data-testid="asset-ip"][data-error="true"]').count()) > 0,
+    'Asset form rejects an out-of-range IPv4 octet'
+  );
+
+  await page.locator('[data-testid="asset-name"]').fill('prod-use1-edge-13');
+  await page.locator('[data-testid="asset-ip"]').fill('10.0.12.13');
+  await page.locator('[data-testid="asset-hostname"]').fill('edge-13.us-east-1.internal');
+  await page.locator('[data-testid="asset-submit"]').click();
+  await page.waitForTimeout(1200);
+
+  const persisted = await page.evaluate(
+    () =>
+      new Promise((resolve) => {
+        const request = indexedDB.open('StatusMonitorDB');
+        request.onsuccess = () => {
+          const handle = request.result;
+          const tx = handle.transaction('servers', 'readonly');
+          // `name` is an indexed field on the servers store.
+          const req = tx.objectStore('servers').index('name').get('prod-use1-edge-13');
+          req.onsuccess = () => resolve(req.result ?? null);
+          req.onerror = () => resolve(null);
+        };
+        request.onerror = () => resolve(null);
+      })
+  );
+  assert(Boolean(persisted), 'A valid asset draft is persisted to IndexedDB');
+  assertEqual(
+    persisted?.specs?.architecture,
+    'x86_64',
+    'The persisted asset keeps its capacity spec'
+  );
+  assertEqual(persisted?.environment, 'production', 'The persisted asset keeps its environment');
+  assertEqual(persisted?.ipAddress, '10.0.12.13', 'The persisted asset keeps its IP address');
+
+  // The form navigates to the new instance; go back and confirm it is listed.
+  await page.goto(`${BASE_URL}/`, { waitUntil: 'networkidle' });
+  await waitForFleetReady(page);
+  await page.waitForTimeout(400);
+  assertEqual(
+    await countVisible(page, '[data-testid="server-row-name"]'),
+    13,
+    'The newly registered instance appears in the fleet table'
+  );
+
+  /* ---- incident drawer ---- */
+  await page.goto(`${BASE_URL}/incidents`, { waitUntil: 'networkidle' });
+  await waitForFleetReady(page);
+  await page.waitForTimeout(600);
+
+  assert((await page.locator('[data-testid="incident-open"]').count()) > 0, 'Incident register lists incidents');
+  await page.locator('[data-testid="incident-open"]').first().click();
+  await page.waitForTimeout(400);
+  assert((await page.locator('[data-testid="incident-drawer"]').count()) > 0, 'Incident timeline drawer opens');
+  const eventsBefore = await page.locator('[data-testid="timeline-event"]').count();
+  assert(eventsBefore > 0, `Incident timeline renders its events (${eventsBefore})`);
+
+  await page.locator('[data-testid="incident-note"]').fill('   ');
+  await page.locator('[data-testid="incident-note-submit"]').click();
+  await page.waitForTimeout(300);
+  assert(
+    (await page.locator('[data-testid="incident-note"][aria-invalid="true"]').count()) > 0,
+    'Incident drawer rejects an empty timeline note'
+  );
+
+  await page.locator('[data-testid="incident-note"]').fill('Rolled back the drain request and re-queued the batch.');
+  await page.locator('[data-testid="incident-note-submit"]').click();
+  await page.waitForTimeout(500);
+  assertEqual(
+    await page.locator('[data-testid="timeline-event"]').count(),
+    eventsBefore + 1,
+    'Appending a note extends the append-only timeline'
+  );
+
+  await page.locator('[data-testid="incident-severity-SEV-2"]').click();
+  await page.waitForTimeout(500);
+  assertEqual(
+    await page.locator('[data-testid="timeline-event"]').count(),
+    eventsBefore + 2,
+    'Changing severity records a timeline event'
+  );
+
+  const transitionButton = page.locator('[data-testid="incident-transition-investigating"]');
+  if ((await transitionButton.count()) > 0) {
+    await transitionButton.click();
+    await page.waitForTimeout(500);
+    assertEqual(
+      await page.locator('[data-testid="timeline-event"]').count(),
+      eventsBefore + 3,
+      'Advancing the lifecycle status records a transition event'
+    );
+    assert(
+      (await page.locator('[data-testid="incident-transition-resolved"]').count()) > 0,
+      'The next lifecycle transition becomes available'
+    );
   }
+
+  await page.locator('[data-testid="incident-close"]').click();
+  await page.waitForTimeout(300);
+  assertEqual(
+    await page.locator('[data-testid="incident-drawer"]').count(),
+    0,
+    'Incident drawer dismisses on close'
+  );
+
+  const mttr = await page.locator('[data-testid="incident-summary-mttr"]').textContent();
+  assert((mttr ?? '').length > 0, `Mean time to resolve is surfaced on the register (${mttr?.trim()})`);
 }
-
 /* ------------------------------------------------------------------ */
 /* Phase 5 — page assembly & responsive audit                         */
 /* ------------------------------------------------------------------ */

@@ -141,6 +141,7 @@
 <span
   data-testid="badge"
   data-variant={variant}
+  data-value={value}
   data-tone={tone}
   class="inline-flex items-center rounded border font-mono font-semibold uppercase tracking-wide {SIZE_CLASS[
     size
