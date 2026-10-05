@@ -2,9 +2,12 @@ import Dexie from 'dexie';
 import { db, pruneExpiredData, seedInitialDataIfEmpty } from '#lib/db';
 import {
   applyEvaluations,
+  evaluateFleetRules,
   evaluateRules,
   incidentFromAlarm,
-  isTerminalStatus
+  isTerminalStatus,
+  reconcileDuplicateIncidents,
+  FLEET_SCOPE
 } from '#lib/engine/alarmEvaluator';
 import type {
   AlarmRule,
@@ -28,6 +31,16 @@ import { clamp, summarizeMetricSeries } from '#lib/utils/statistics';
 
 /** Minimum wall-clock gap between retention sweeps, in milliseconds. */
 const PRUNE_INTERVAL_MS = 10 * 60 * 1000;
+
+/** Steady-state bandwidth targets, in Kbps. */
+const NETWORK_BASELINE_IN = 16_000;
+const NETWORK_BASELINE_OUT = 24_000;
+
+/** Fraction of the remaining gap to baseline closed on each tick. */
+const NETWORK_REVERSION = 0.08;
+
+/** Hard ceiling for a synthesised bandwidth sample, in Kbps. */
+const NETWORK_CEILING = 100_000;
 
 const CRITICAL = { cpu: 90, memory: 92, latency: 250 } as const;
 const WARNING = { cpu: 75, memory: 80, latency: 100 } as const;
@@ -128,12 +141,26 @@ function nextSample(previous: MetricDataPoint, now: number): MetricDataPoint {
   const cpu = clamp(cpuBase + (Math.random() - 0.5) * 7 + drift * 1.6, 1, 100);
   const memory = clamp(memoryBase + (Math.random() - 0.5) * 1.8 + drift * 0.5, 5, 99);
   const disk = clamp(diskBase + (Math.random() - 0.5) * 0.12, 1, 98);
-  const networkIn = clamp(networkInBase * (0.94 + Math.random() * 0.14) + drift * 400, 120, 10_000_000);
-  const networkOut = clamp(
-    networkOutBase * (0.94 + Math.random() * 0.14) + drift * 520,
-    160,
-    10_000_000
-  );
+  /*
+   * Mean-reverting drift rather than a compounding random walk.
+   *
+   * The previous implementation multiplied each channel by a factor whose
+   * expectation exceeded 1.0, so a channel starting at 26 Mbps saturated at its
+   * ceiling within a few hundred ticks and latched bandwidth alarms
+   * permanently. Each channel now steps toward a realistic baseline instead,
+   * which is bounded by construction.
+   */
+  const netInDrift =
+    (NETWORK_BASELINE_IN - networkInBase) * NETWORK_REVERSION +
+    (Math.random() - 0.5) * 800 +
+    drift * 350;
+  const netOutDrift =
+    (NETWORK_BASELINE_OUT - networkOutBase) * NETWORK_REVERSION +
+    (Math.random() - 0.5) * 1200 +
+    drift * 450;
+
+  const networkIn = clamp(networkInBase + netInDrift, 120, NETWORK_CEILING);
+  const networkOut = clamp(networkOutBase + netOutDrift, 160, NETWORK_CEILING);
   const latency = clamp(latencyBase + (Math.random() - 0.5) * 3.4 + drift * 2.2, 1.1, 880);
 
   return {
@@ -275,7 +302,21 @@ class MonitorState {
 
     this.servers = [...servers].sort((a, b) => a.name.localeCompare(b.name));
     this.alarms = [...alarms].sort((a, b) => a.name.localeCompare(b.name));
-    this.incidents = [...incidents].sort((a, b) => b.startedAt - a.startedAt);
+    /*
+     * Close duplicate unresolved incidents before they reach reactive state.
+     * Databases written before incident creation became idempotent can hold many
+     * concurrent records for one alarm, which would otherwise inflate the
+     * open-incident rollup and every MTTR figure derived from it.
+     */
+    const reconciliation = reconcileDuplicateIncidents(incidents, Date.now());
+    if (reconciliation.resolvedDuplicateIds.length > 0) {
+      const touched = new Set(reconciliation.resolvedDuplicateIds);
+      await db.incidents.bulkPut(
+        plain(reconciliation.incidents.filter((incident) => touched.has(incident.id)))
+      );
+    }
+
+    this.incidents = [...reconciliation.incidents].sort((a, b) => b.startedAt - a.startedAt);
     this.activeTelemetry = await this.loadLatestTelemetryMap();
   }
 
@@ -384,7 +425,12 @@ class MonitorState {
         const logEntry = this.buildLogEntry(server.id, metrics, now);
         if (logEntry) newLogRows.push(logEntry);
 
-        // Rules bound to this host plus the fleet-scoped rules.
+        /*
+         * Only rules bound to THIS host. Fleet-scoped rules are evaluated once
+         * after the loop against aggregate metrics: running them here would let
+         * each host advance and then reset the same shared rule instance, so its
+         * state and streak would depend purely on array ordering.
+         */
         const batch = evaluateRules(alarms, server.id, metrics, now);
         if (batch.evaluations.length > 0) alarms = applyEvaluations(alarms, batch.evaluations);
 
@@ -426,6 +472,60 @@ class MonitorState {
         };
         servers[index] = updated;
         changedServers.push(updated);
+      }
+
+      /*
+       * Fleet-scoped rules get exactly one evaluation per cycle, against a
+       * single aggregate sample built from the hosts actually reporting.
+       * Averages come from the fresh in-cycle `telemetry` map rather than from
+       * `fleetSummary`, which still reflects the previous cycle.
+       */
+      const reportingIds = servers
+        .filter((item) => item.status !== 'offline' && item.status !== 'maintenance')
+        .map((item) => item.id)
+        .filter((id) => telemetry[id] != null);
+
+      const fleetAverage = (select: (metrics: MetricDataPoint) => number): number =>
+        reportingIds.length === 0
+          ? 0
+          : reportingIds.reduce(
+              (sum, id) => sum + select(telemetry[id] as MetricDataPoint),
+              0
+            ) / reportingIds.length;
+
+      const fleetMetrics: MetricDataPoint = {
+        timestamp: now,
+        cpuUsage: Number(fleetAverage((m) => m.cpuUsage).toFixed(2)),
+        memoryUsage: Number(fleetAverage((m) => m.memoryUsage).toFixed(2)),
+        diskUsage: Number(fleetAverage((m) => m.diskUsage).toFixed(2)),
+        networkInKbps: Math.round(fleetAverage((m) => m.networkInKbps)),
+        networkOutKbps: Math.round(fleetAverage((m) => m.networkOutKbps)),
+        latencyMs: Number(fleetAverage((m) => m.latencyMs).toFixed(2))
+      };
+
+      const fleetBatch = evaluateFleetRules(alarms, fleetMetrics, now);
+      if (fleetBatch.evaluations.length > 0) {
+        alarms = applyEvaluations(alarms, fleetBatch.evaluations);
+      }
+
+      for (const evaluation of fleetBatch.triggered) {
+        const alreadyOpen =
+          this.incidents.some(
+            (incident) =>
+              incident.alarmRuleId === evaluation.rule.id &&
+              incident.serverId === FLEET_SCOPE &&
+              incident.status !== 'resolved'
+          ) ||
+          openedIncidents.some(
+            (incident) =>
+              incident.alarmRuleId === evaluation.rule.id && incident.serverId === FLEET_SCOPE
+          );
+
+        if (alreadyOpen) continue;
+
+        openedIncidents.push(
+          incidentFromAlarm(evaluation.rule, undefined, FLEET_SCOPE, evaluation.breachedValue, now)
+        );
       }
 
       // The transaction lists exactly the tables written this tick. Retention

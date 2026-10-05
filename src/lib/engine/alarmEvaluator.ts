@@ -105,16 +105,63 @@ export function evaluateRule(
   };
 }
 
+export interface EvaluateScope {
+  /**
+   * When true, fleet-scoped rules are evaluated in this pass too.
+   *
+   * Defaults to false. Fleet-scoped rules MUST NOT run inside a per-server loop:
+   * a single rule instance would have its streak advanced by one host and reset
+   * by the next within the same tick, so its state and streak would depend
+   * purely on array ordering and latch or clear at random. Use
+   * {@link evaluateFleetRules} against aggregate metrics instead.
+   */
+  includeFleet?: boolean;
+}
+
 /**
- * Evaluate every rule that applies to `serverId` against one sample.
+ * Evaluate the instance-scoped rules bound to `serverId` against one sample.
  *
- * Rules scoped to the fleet sentinel are included alongside the rules bound to
- * this specific server.
+ * Fleet-scoped rules are excluded unless explicitly requested, so a per-server
+ * sweep can never mutate a shared rule instance.
  */
 export function evaluateRules(
   rules: readonly AlarmRule[],
   serverId: string,
   metrics: MetricDataPoint,
+  now: number,
+  options: EvaluateScope = {}
+): BatchEvaluation {
+  const evaluations: RuleEvaluation[] = [];
+  const triggered: RuleEvaluation[] = [];
+  const changedIndexes: number[] = [];
+
+  rules.forEach((rule, index) => {
+    if (!rule.enabled) return;
+    if (rule.serverId === FLEET_SCOPE) {
+      if (!options.includeFleet) return;
+    } else if (rule.serverId !== serverId) {
+      return;
+    }
+
+    const evaluation = evaluateRule(rule, metrics, now);
+    evaluations.push(evaluation);
+    if (evaluation.triggered) triggered.push(evaluation);
+    if (evaluation.stateChanged) changedIndexes.push(index);
+  });
+
+  return { evaluations, triggered, changedIndexes };
+}
+
+/**
+ * Evaluate the fleet-scoped rules against aggregate fleet metrics.
+ *
+ * This is the only correct way to advance a fleet-scoped rule: exactly one
+ * evaluation per rule per cycle, against a single fleet-wide sample, so the
+ * streak and state can never be flipped by a neighbouring host.
+ */
+export function evaluateFleetRules(
+  rules: readonly AlarmRule[],
+  fleetMetrics: MetricDataPoint,
   now: number
 ): BatchEvaluation {
   const evaluations: RuleEvaluation[] = [];
@@ -123,9 +170,9 @@ export function evaluateRules(
 
   rules.forEach((rule, index) => {
     if (!rule.enabled) return;
-    if (rule.serverId !== serverId && rule.serverId !== FLEET_SCOPE) return;
+    if (rule.serverId !== FLEET_SCOPE) return;
 
-    const evaluation = evaluateRule(rule, metrics, now);
+    const evaluation = evaluateRule(rule, fleetMetrics, now);
     evaluations.push(evaluation);
     if (evaluation.triggered) triggered.push(evaluation);
     if (evaluation.stateChanged) changedIndexes.push(index);
@@ -231,6 +278,73 @@ export function meanTimeToResolve(incidents: readonly Incident[]): number | null
   if (resolved.length === 0) return null;
   const total = resolved.reduce((sum, incident) => sum + resolvedDurationMs(incident), 0);
   return Math.max(0, Math.round(total / resolved.length));
+}
+
+export interface IncidentReconciliation {
+  /** Every incident, with redundant duplicates marked resolved. */
+  incidents: Incident[];
+  /** Ids of the incidents this pass transitioned to resolved. */
+  resolvedDuplicateIds: string[];
+}
+
+/**
+ * Compose the identity of an incident's underlying condition.
+ *
+ * Manually raised incidents carry no alarm rule, so they are grouped under a
+ * distinct sentinel rather than being treated as one global bucket.
+ */
+export function incidentConditionKey(incident: Incident): string {
+  return `${incident.alarmRuleId ?? 'manual'}:${incident.serverId}`;
+}
+
+/**
+ * Collapse duplicate unresolved incidents for the same condition.
+ *
+ * Incident creation is idempotent only while an incident is open, so databases
+ * written before that guard existed can hold many concurrent records for a
+ * single alarm. The oldest record is kept as the authentic one and the rest are
+ * closed, so historical duplicates stop inflating the open-incident rollup.
+ * Every closure is appended to the timeline rather than erased, preserving the
+ * append-only contract of the record.
+ */
+export function reconcileDuplicateIncidents(
+  incidents: readonly Incident[],
+  now: number
+): IncidentReconciliation {
+  const survivors = new Map<string, Incident>();
+
+  const ordered = [...incidents].sort((a, b) => {
+    if (a.startedAt !== b.startedAt) return a.startedAt - b.startedAt;
+    return a.id.localeCompare(b.id);
+  });
+
+  for (const incident of ordered) {
+    if (isTerminalStatus(incident.status)) continue;
+
+    const key = incidentConditionKey(incident);
+    const incumbent = survivors.get(key);
+
+    if (!incumbent) {
+      survivors.set(key, incident);
+      continue;
+    }
+
+    incident.status = 'resolved';
+    incident.resolvedAt = now;
+    incident.timeline.push({
+      id: generateEntityId(ID_PREFIXES.event),
+      timestamp: now,
+      message: `Closed during startup reconciliation as a duplicate of ${incumbent.id}`,
+      author: 'Incident Reconciler',
+      statusTransition: 'resolved'
+    });
+  }
+
+  const resolvedDuplicateIds = incidents
+    .filter((incident) => isTerminalStatus(incident.status))
+    .map((incident) => incident.id);
+
+  return { incidents: [...incidents], resolvedDuplicateIds };
 }
 
 /**

@@ -943,7 +943,12 @@ async function checkPhase4(page) {
 
     const batch = engine.evaluateRules([base, { ...base, id: 'r2', serverId: 'srv-b' }], 'srv-a', sample(95), 1000);
     const disabled = engine.evaluateRule({ ...base, enabled: false }, sample(99), 1000);
-    const fleet = engine.evaluateRules([{ ...base, serverId: 'all' }], 'srv-zzz', sample(10), 1000);
+    const fleetRule = { ...base, id: 'r3', serverId: 'all' };
+    const fleet = engine.evaluateRules([fleetRule], 'srv-zzz', sample(10), 1000);
+    const fleetOptIn = engine.evaluateRules([fleetRule], 'srv-zzz', sample(10), 1000, {
+      includeFleet: true
+    });
+    const fleetOnly = engine.evaluateFleetRules([fleetRule, base], sample(10), 1000);
 
     const incident = engine.incidentFromAlarm(base, {
       id: 'srv-a',
@@ -982,6 +987,10 @@ async function checkPhase4(page) {
       batchTriggered: batch.triggered.length,
       disabledEvaluated: disabled.evaluations === undefined ? 0 : disabled.rule.state,
       fleetScopeApplied: fleet.evaluations.length,
+      fleetOptInApplied: fleetOptIn.evaluations.length,
+      fleetOnlyEvaluations: fleetOnly.evaluations.length,
+      fleetOnlyIds: fleetOnly.evaluations.map((e) => e.rule.id),
+      fleetOnlyIgnoredServerRule: fleetOnly.evaluations.every((e) => e.rule.serverId === 'all'),
       incidentSeverity: incident.severity,
       incidentStatus: incident.status,
       incidentTimeline: incident.timeline.length,
@@ -1007,7 +1016,22 @@ async function checkPhase4(page) {
   assertEqual(engine.lastEvaluatedMoves, 3000, 'lastEvaluatedAt advances on every evaluation');
   assertEqual(engine.immutable, true, 'evaluateRule returns a new object and never mutates the input rule');
   assertEqual(engine.batchEvaluated, 1, 'Batch evaluation skips rules bound to a different host');
-  assertEqual(engine.fleetScopeApplied, 1, 'Fleet-scoped rules are evaluated against every host');
+  assertEqual(
+    engine.fleetScopeApplied,
+    0,
+    'Fleet-scoped rules are NOT evaluated inside the per-server loop'
+  );
+  assertEqual(engine.fleetOptInApplied, 1, 'Fleet-scoped rules can be opted into explicitly');
+  assertEqual(
+    engine.fleetOnlyEvaluations,
+    1,
+    'evaluateFleetRules evaluates exactly the fleet-scoped rules'
+  );
+  assertEqual(
+    engine.fleetOnlyIgnoredServerRule,
+    true,
+    'evaluateFleetRules ignores instance-scoped rules'
+  );
   assertEqual(engine.incidentSeverity, 'SEV-1', 'Breaches beyond 125% of threshold open a SEV-1 incident');
   assertEqual(engine.incidentStatus, 'open', 'A newly opened incident starts in the open state');
   assertEqual(engine.incidentTimeline, 1, 'The new incident timeline starts with the detection event');
@@ -1035,27 +1059,69 @@ async function checkPhase4(page) {
   await waitForFleetReady(page);
   await page.waitForTimeout(400);
 
-  // Scope to an online host: drained and powered-down instances never report.
-  const onlineRow = page.locator('[data-testid="table-row"]', { hasText: 'prod-use1-api-gw-01' });
+  /*
+   * Scope to an online host: drained and powered-down instances never report.
+   *
+   * The invariant asserted is that a NEW SAMPLE was written, proven by the
+   * persisted timestamp advancing. Comparing the rendered percentage is not a
+   * valid signal: the synthesiser applies bounded noise, so a value sitting at a
+   * clamp boundary can legitimately round to the same one decimal twice.
+   */
+  const SERVER_NAME = 'prod-use1-api-gw-01';
+  const onlineRow = page.locator('[data-testid="table-row"]', { hasText: SERVER_NAME });
   const cpuCell = onlineRow.locator('[data-testid="cpu-value"]').first();
-  const before = ((await cpuCell.textContent()) ?? '').trim();
+
+  const stamp = async () => {
+    await page.evaluate(async (name) => {
+      const store = await window.__liveModule('monitorStore.svelte.ts');
+      const dbModule = await import('/src/lib/db/index.ts');
+      const server = store.monitorStore.servers.find((item) => item.name === name);
+      window.__probeServerId = server?.id ?? null;
+      if (!server) return;
+      const row = await dbModule.db.telemetry
+        .where('serverId')
+        .equals(server.id)
+        .last();
+      window.__probeStamp = row?.timestamp ?? 0;
+    }, SERVER_NAME);
+    return page.evaluate(() => window.__probeStamp ?? 0);
+  };
+
+  const stampBefore = await stamp();
+  const cpuBefore = ((await cpuCell.textContent()) ?? '').trim();
+  const tickBefore = await page.evaluate(async () => {
+    const store = await window.__liveModule('monitorStore.svelte.ts');
+    return store.monitorStore.lastPollAt ?? 0;
+  });
+
   await page.evaluate(() => document.querySelector('[aria-label="Refresh telemetry now"]')?.click());
-  const changed = await page
+
+  // Wait on the store's own reactive tick counter, which the collector updates.
+  const ticked = await page
     .waitForFunction(
-      (previous) => {
-        const row = Array.from(document.querySelectorAll('[data-testid="table-row"]')).find((r) =>
-          r.textContent?.includes('prod-use1-api-gw-01')
-        );
-        const cell = row?.querySelector('[data-testid="cpu-value"]');
-        return Boolean(cell) && cell.textContent?.trim() !== previous;
+      async (previous) => {
+        const store = await window.__liveModule('monitorStore.svelte.ts');
+        return (store.monitorStore.lastPollAt ?? 0) > previous;
       },
-      before,
-      { timeout: 10_000 }
+      tickBefore,
+      { timeout: 15_000 }
     )
     .then(() => true)
     .catch(() => false);
-  const after = ((await cpuCell.textContent()) ?? '').trim();
-  assert(changed, `A manual poll cycle produces a new CPU sample (${before} -> ${after})`);
+  const advanced = ticked && (await stamp()) > stampBefore;
+  const stampAfter = await stamp();
+
+  assert(ticked, 'A manual refresh advances the collector tick counter');
+
+  assert(
+    advanced,
+    `A manual poll cycle writes a new telemetry sample (timestamp ${stampBefore} -> ${stampAfter})`
+  );
+  assert(/^\d+(\.\d+)?%$/.test(cpuBefore), `The reporting host renders a percentage (${cpuBefore})`);
+  assert(
+    Number.parseFloat(cpuBefore) >= 0 && Number.parseFloat(cpuBefore) <= 100,
+    `The rendered cpu reading stays inside 0-100 (${cpuBefore})`
+  );
 
   const offlineRow = page.locator('[data-testid="table-row"]', { hasText: 'dev-sae1-edge-sim-01' });
   const offlineCpu = await offlineRow.locator('[data-testid="cpu-value"]').first().textContent();
@@ -1304,30 +1370,50 @@ async function checkPhase4(page) {
     'Incident drawer rejects an empty timeline note'
   );
 
+  /*
+   * Collector ticks can open new incidents while the drawer is open, which
+   * re-orders the register behind the drawer. Every mutation therefore reads a
+   * fresh baseline immediately beforehand instead of reusing a count captured
+   * at open time.
+   */
+  const countEvents = () => page.locator('[data-testid="timeline-event"]').count();
+
+  let noteBaseline = await countEvents();
   await page.locator('[data-testid="incident-note"]').fill('Rolled back the drain request and re-queued the batch.');
   await page.locator('[data-testid="incident-note-submit"]').click();
   await page.waitForTimeout(500);
   assertEqual(
-    await page.locator('[data-testid="timeline-event"]').count(),
-    eventsBefore + 1,
+    await countEvents(),
+    noteBaseline + 1,
     'Appending a note extends the append-only timeline'
   );
 
-  await page.locator('[data-testid="incident-severity-SEV-2"]').click();
+  // Choose a severity that actually differs from the current one; the store
+  // treats a same-value write as a no-op.
+  const currentSeverity = await page.evaluate(() =>
+    document
+      .querySelector('[data-testid="incident-drawer"] [data-testid="badge"][data-variant="severity"]')
+      ?.getAttribute('data-value')
+  );
+  const targetSeverity = ['SEV-1', 'SEV-2', 'SEV-3', 'SEV-4'].find((s) => s !== currentSeverity);
+
+  const severityBaseline = await countEvents();
+  await page.locator(`[data-testid="incident-severity-${targetSeverity}"]`).click();
   await page.waitForTimeout(500);
   assertEqual(
-    await page.locator('[data-testid="timeline-event"]').count(),
-    eventsBefore + 2,
-    'Changing severity records a timeline event'
+    await countEvents(),
+    severityBaseline + 1,
+    `Changing severity to ${targetSeverity} records a timeline event`
   );
 
   const transitionButton = page.locator('[data-testid="incident-transition-investigating"]');
   if ((await transitionButton.count()) > 0) {
+    const transitionBaseline = await countEvents();
     await transitionButton.click();
     await page.waitForTimeout(500);
     assertEqual(
-      await page.locator('[data-testid="timeline-event"]').count(),
-      eventsBefore + 3,
+      await countEvents(),
+      transitionBaseline + 1,
       'Advancing the lifecycle status records a transition event'
     );
     assert(
@@ -2643,6 +2729,319 @@ async function auditPhase5DesignSystem(page) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Audit phase 6 — telemetry drift, fleet isolation, reconciliation   */
+/* ------------------------------------------------------------------ */
+
+async function auditPhase6TelemetryIntegrity(page) {
+  section('Audit Phase 6 · Fleet Isolation, Drift & Reconciliation');
+
+  await page.goto(`${BASE_URL}/`, { waitUntil: 'networkidle' });
+  await waitForFleetReady(page);
+  await page.waitForTimeout(400);
+
+  /* ---- DATA-05: fleet rules ignore individual hot hosts --------------- */
+  const fleetIsolation = await page.evaluate(async () => {
+    const store = await window.__liveModule('monitorStore.svelte.ts');
+    const monitor = store.monitorStore;
+
+    const rule = await monitor.createAlarm({
+      name: 'Fleet isolation probe',
+      serverId: 'all',
+      metric: 'cpu',
+      operator: 'GT',
+      threshold: 90,
+      evaluationPeriods: 2,
+      periodSeconds: 10,
+      enabled: true
+    });
+
+    const reporting = monitor.servers.filter(
+      (server) => server.status !== 'offline' && server.status !== 'maintenance'
+    );
+    const beforeIncidents = monitor.incidents.length;
+
+    // Two hosts hot, the rest cold. The fleet average stays far below 90.
+    reporting.forEach((server, index) => {
+      monitor.activeTelemetry = {
+        ...monitor.activeTelemetry,
+        [server.id]: {
+          timestamp: Date.now(),
+          cpuUsage: index < 2 ? 95 : 10,
+          memoryUsage: 50,
+          diskUsage: 50,
+          networkInKbps: 1000,
+          networkOutKbps: 1000,
+          latencyMs: 12
+        }
+      };
+    });
+
+    for (let cycle = 0; cycle < 5; cycle++) {
+      reporting.forEach((server, index) => {
+        monitor.activeTelemetry = {
+          ...monitor.activeTelemetry,
+          [server.id]: {
+            ...monitor.activeTelemetry[server.id],
+            cpuUsage: index < 2 ? 95 : 10,
+            timestamp: Date.now()
+          }
+        };
+      });
+      await monitor.pollCycle();
+      await monitor.setAlarmState(rule.id, 'OK');
+    }
+
+    const finalRule = monitor.alarms.find((item) => item.id === rule.id);
+    const fleetIncidents = monitor.incidents.filter(
+      (incident) => incident.alarmRuleId === rule.id
+    );
+
+    const result = {
+      fleetAverageCpu: Number(
+        (
+          reporting.reduce(
+            (sum, server) => sum + (monitor.activeTelemetry[server.id]?.cpuUsage ?? 0),
+            0
+          ) / reporting.length
+        ).toFixed(1)
+      ),
+      hotHosts: reporting.filter((server) => (monitor.activeTelemetry[server.id]?.cpuUsage ?? 0) > 90)
+        .length,
+      totalHosts: reporting.length,
+      state: finalRule?.state ?? null,
+      streak: finalRule?.consecutiveBreaches ?? null,
+      fleetIncidents: fleetIncidents.length,
+      incidentsDelta: monitor.incidents.length - beforeIncidents,
+      ruleId: rule.id
+    };
+
+    await monitor.deleteAlarm(rule.id);
+    return result;
+  });
+
+  assertEqual(fleetIsolation.hotHosts, 2, 'The probe holds exactly two hosts in breach');
+  assert(fleetIsolation.totalHosts > 5, 'The probe spans the whole reporting fleet');
+  assert(
+    fleetIsolation.fleetAverageCpu < 40,
+    `The fleet average stays far below the 90% threshold (${fleetIsolation.fleetAverageCpu}%)`
+  );
+  assertEqual(
+    fleetIsolation.state,
+    'OK',
+    'A fleet-scoped rule stays OK while only a minority of hosts breach'
+  );
+  assertEqual(
+    fleetIsolation.streak,
+    0,
+    'A fleet-scoped rule never accumulates a breach streak from individual hosts'
+  );
+  assertEqual(
+    fleetIsolation.fleetIncidents,
+    0,
+    'Zero fleet incidents are opened for two isolated hot hosts'
+  );
+  assertEqual(
+    fleetIsolation.incidentsDelta,
+    0,
+    'The fleet probe opens no incident at all across five cycles'
+  );
+
+  /* ---- DATA-06: bandwidth channels mean-revert, never explode ---------- */
+  const drift = await page.evaluate(async () => {
+    const store = await window.__liveModule('monitorStore.svelte.ts');
+    const dbModule = await import('/src/lib/db/index.ts');
+    const monitor = store.monitorStore;
+
+    const server = monitor.servers.find((item) => item.status !== 'offline' && item.status !== 'maintenance');
+    if (!server) return { skipped: true };
+
+    let sample = {
+      timestamp: Date.now(),
+      cpuUsage: 40,
+      memoryUsage: 50,
+      diskUsage: 50,
+      networkInKbps: 26_200,
+      networkOutKbps: 26_200
+    };
+
+    const readings = [];
+    for (let tick = 0; tick < 100; tick++) {
+      // Drive the synthesiser through the real poll path by seeding the map and
+      // reading back the sample the store produced.
+      monitor.activeTelemetry = { ...monitor.activeTelemetry, [server.id]: sample };
+      await monitor.pollCycle();
+      const next = monitor.activeTelemetry[server.id];
+      if (!next) break;
+      readings.push(next.networkOutKbps);
+      sample = { ...next, networkOutKbps: next.networkOutKbps, networkInKbps: next.networkInKbps };
+    }
+
+    const final = monitor.activeTelemetry[server.id];
+    const persisted = await dbModule.db.telemetry
+      .where('serverId')
+      .equals(server.id)
+      .last();
+
+    const result = {
+      skipped: false,
+      count: readings.length,
+      min: Math.min(...readings),
+      max: Math.max(...readings),
+      first: readings[0] ?? null,
+      last: readings[readings.length - 1] ?? null,
+      finalValue: final?.networkOutKbps ?? null,
+      persistedValue: persisted?.metrics.networkOutKbps ?? null,
+      atCeiling: readings.filter((v) => v >= 100_000).length,
+      // A mean-reverting series must contain decreases; a compounding walk
+      // would never produce one.
+      decreaseCount: readings.filter((value, index) => index > 0 && value < readings[index - 1])
+        .length,
+      increaseCount: readings.filter((value, index) => index > 0 && value > readings[index - 1])
+        .length
+    };
+
+    await monitor.loadAll();
+    return result;
+  });
+
+  assert(!drift.skipped, 'A reporting host was available for the drift probe');
+  assertEqual(drift.count, 100, 'The drift probe ran a full 100 ticks');
+  assert(
+    drift.min >= 10_000,
+    `Bandwidth never collapses below a realistic floor (min ${drift.min} Kbps)`
+  );
+  assert(
+    drift.max <= 45_000,
+    `Bandwidth never compounds above a realistic ceiling (max ${drift.max} Kbps)`
+  );
+  assertEqual(drift.atCeiling, 0, 'Bandwidth never reaches the 100000 Kbps clamp ceiling');
+  assert(
+    drift.finalValue !== null && drift.finalValue < 45_000,
+    `Bandwidth settles near its baseline instead of saturating (final ${drift.finalValue} Kbps)`
+  );
+  assert(
+    drift.persistedValue !== null && drift.persistedValue < 45_000,
+    `The persisted sample reflects the bounded walk (${drift.persistedValue} Kbps)`
+  );
+  assert(
+    drift.decreaseCount > 10,
+    `Bandwidth repeatedly steps downward, proving it reverts rather than compounds (${drift.decreaseCount} decreases, ${drift.increaseCount} increases)`
+  );
+  assert(
+    drift.max - drift.min < 20_000,
+    `Total bandwidth variation stays in a realistic band (${drift.max - drift.min} Kbps spread)`
+  );
+
+  /* ---- DATA-07: startup reconciliation collapses duplicates ------------ */
+  const reconciliation = await page.evaluate(async () => {
+    const store = await window.__liveModule('monitorStore.svelte.ts');
+    const dbModule = await import('/src/lib/db/index.ts');
+    const engine = await import('/src/lib/engine/alarmEvaluator.ts');
+    const monitor = store.monitorStore;
+
+    const base = Date.now() - 6 * 60 * 60 * 1000;
+    const duplicates = Array.from({ length: 10 }, (_, index) => ({
+      id: `inc-dup-probe-${String(index).padStart(2, '0')}`,
+      serverId: 'srv-probe',
+      serverName: 'probe',
+      alarmRuleId: 'alm-probe',
+      title: `Duplicate probe ${index}`,
+      severity: 'SEV-3',
+      status: 'open',
+      startedAt: base + index * 1000,
+      resolvedAt: null,
+      timeline: [
+        {
+          id: `evt-dup-probe-${index}`,
+          timestamp: base + index * 1000,
+          message: 'opened',
+          author: 'probe',
+          statusTransition: 'open'
+        }
+      ]
+    }));
+
+    // A distinct condition that must survive reconciliation untouched.
+    const unrelated = {
+      id: 'inc-unrelated-probe',
+      serverId: 'srv-probe',
+      serverName: 'probe',
+      alarmRuleId: 'alm-other',
+      title: 'Unrelated probe',
+      severity: 'SEV-4',
+      status: 'open',
+      startedAt: base,
+      resolvedAt: null,
+      timeline: [
+        {
+          id: 'evt-unrelated-probe',
+          timestamp: base,
+          message: 'opened',
+          author: 'probe',
+          statusTransition: 'open'
+        }
+      ]
+    };
+
+    await dbModule.db.incidents.bulkPut([...duplicates, unrelated]);
+    await monitor.loadAll();
+
+    const persisted = await dbModule.db.incidents.toArray();
+    const probeRows = persisted.filter((incident) => incident.alarmRuleId === 'alm-probe');
+    const openProbeRows = probeRows.filter((incident) => incident.status !== 'resolved');
+    const unrelatedRows = persisted.filter((incident) => incident.alarmRuleId === 'alm-other');
+
+    const result = {
+      totalProbeRows: probeRows.length,
+      openProbeRows: openProbeRows.length,
+      resolvedProbeRows: probeRows.filter((incident) => incident.status === 'resolved').length,
+      survivorId: openProbeRows[0]?.id ?? null,
+      oldestId: duplicates[0].id,
+      hasTimelineNote: probeRows
+        .filter((incident) => incident.status === 'resolved')
+        .every((incident) =>
+          incident.timeline.some((event) => event.author === 'Incident Reconciler')
+        ),
+      unrelatedOpen: unrelatedRows.filter((incident) => incident.status !== 'resolved').length,
+      inMemoryOpen: monitor.incidents.filter(
+        (incident) => incident.alarmRuleId === 'alm-probe' && incident.status !== 'resolved'
+      ).length,
+      keyHelper: engine.incidentConditionKey(unrelated)
+    };
+
+    await dbModule.db.incidents.bulkDelete([
+      ...probeRows.map((i) => i.id),
+      ...unrelatedRows.map((i) => i.id)
+    ]);
+    await monitor.loadAll();
+    return result;
+  });
+
+  assertEqual(reconciliation.totalProbeRows, 10, 'All ten duplicate probe rows were written');
+  assertEqual(
+    reconciliation.openProbeRows,
+    1,
+    'Startup reconciliation leaves exactly one open incident for the duplicated condition'
+  );
+  assertEqual(
+    reconciliation.resolvedProbeRows,
+    9,
+    'The nine redundant duplicates are closed rather than deleted'
+  );
+  assertEqual(reconciliation.inMemoryOpen, 1, 'Reactive state holds a single open incident for the condition');
+  assertEqual(reconciliation.unrelatedOpen, 1, 'An unrelated open incident is left untouched');
+  assertEqual(
+    reconciliation.keyHelper,
+    'alm-other:srv-probe',
+    'The condition key composes the alarm rule and the host'
+  );
+  assert(
+    reconciliation.hasTimelineNote,
+    'Every closure is recorded on the append-only timeline'
+  );
+}
+
+/* ------------------------------------------------------------------ */
 /* Audit phase 1 — security and data layer integrity                   */
 /* ------------------------------------------------------------------ */
 
@@ -3192,6 +3591,7 @@ async function main() {
     await auditPhase3Layout(phase1Page);
     await auditPhase4Presentation(phase1Page);
     await auditPhase5DesignSystem(phase1Page);
+    await auditPhase6TelemetryIntegrity(phase1Page);
 
     if (maxPhase >= 3) await checkPhase3(phase1Page);
 
