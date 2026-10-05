@@ -24,8 +24,9 @@ let currentCheck = 'general';
 
 function record(ok, message, detail) {
   results.push({ check: currentCheck, ok, message, detail });
-  const tag = ok ? '\x1b[32mPASS\x1b[0m' : '\x1b[31mFAIL\x1b[0m';
-  console.log(`  ${tag} ${message}${ok || detail === undefined ? '' : `\n       ${detail}`}`);
+  const tag = ok ? '\x1b[32m' : '\x1b[31m';
+  const suffix = ok || detail === undefined ? '' : `\n       ${detail}`;
+  console.log(`  ${tag}${marker(ok)}\x1b[0m ${message}${suffix}`);
 }
 
 function assert(condition, message, detail) {
@@ -67,6 +68,11 @@ async function textsOfVisible(page, selector) {
 function section(title) {
   currentCheck = title;
   console.log(`\n\x1b[1m${title}\x1b[0m`);
+}
+
+/** Plain-text status marker, free of emoji or pictographic characters. */
+function marker(ok) {
+  return ok ? '[PASS]' : '[FAIL]';
 }
 
 /* ------------------------------------------------------------------ */
@@ -1331,6 +1337,348 @@ async function checkPhase4(page) {
   assert((mttr ?? '').length > 0, `Mean time to resolve is surfaced on the register (${mttr?.trim()})`);
 }
 /* ------------------------------------------------------------------ */
+/* Audit phase 1 — security and data layer integrity                   */
+/* ------------------------------------------------------------------ */
+
+async function auditPhase1Security(page) {
+  section('Audit Phase 1 · Security & Data Layer Integrity');
+
+  await page.goto(`${BASE_URL}/`, { waitUntil: 'networkidle' });
+  await waitForFleetReady(page);
+  await page.waitForTimeout(400);
+
+  /* ---- SEC-01: catastrophic backtracking ------------------------------- */
+  const redos = await page.evaluate(async () => {
+    const console_ = await import('/src/lib/components/compound/LogConsole.svelte');
+
+    const sample = 'a'.repeat(200);
+    const startedAt = performance.now();
+    const compiled = console_.compileQuery('(a+)+$');
+    let threw = null;
+    let elapsed = 0;
+    try {
+      const entry = {
+        id: 'redos-probe',
+        serverId: 'srv-redos',
+        timestamp: 1,
+        level: 'INFO',
+        service: 'probe',
+        message: sample
+      };
+      const result = console_.runQuery(compiled, [entry, entry, entry]);
+      elapsed = result.durationMs;
+    } catch (error) {
+      threw = String(error);
+    }
+    const wallClock = performance.now() - startedAt;
+
+    const long = console_.compileQuery('a'.repeat(65));
+    const nested = console_.compileQuery('(.+)+$');
+    const stacked = console_.compileQuery('a**');
+    const benign = console_.compileQuery('ERROR|WARN');
+    const broken = console_.compileQuery('(unclosed');
+
+    return {
+      compiledPattern: compiled.pattern === null,
+      strategy: compiled.strategy,
+      degraded: compiled.degraded,
+      error: compiled.error,
+      elapsed,
+      wallClock,
+      threw,
+      longRejected: long.pattern === null,
+      longError: long.error,
+      nestedRejected: nested.pattern === null,
+      stackedRejected: stacked.pattern === null,
+      benignCompiled: benign.pattern !== null,
+      benignStrategy: benign.strategy,
+      brokenRejected: broken.pattern === null,
+      brokenError: broken.error
+    };
+  });
+
+  assert(redos.compiledPattern, 'compileQuery refuses to compile the catastrophic pattern (a+)+$');
+  assertEqual(redos.strategy, 'literal', 'A rejected pattern degrades to literal substring matching');
+  assert(redos.degraded, 'A rejected pattern is flagged as degraded so the UI can say so');
+  assert(typeof redos.error === 'string' && redos.error.length > 0, 'A rejected pattern carries an operator-facing reason');
+  assertEqual(redos.threw, null, 'Running a catastrophic query does not throw');
+  assert(
+    redos.wallClock < 15,
+    `Catastrophic query completes well under the 15ms ceiling (${redos.wallClock.toFixed(3)}ms)`
+  );
+  assert(redos.longRejected, 'A query longer than the 64 character limit is rejected');
+  assert(/64/.test(redos.longError ?? ''), 'The length rejection names the limit');
+  assert(redos.nestedRejected, 'A nested-quantifier pattern such as (.+)+ is rejected');
+  assert(redos.stackedRejected, 'A stacked-quantifier pattern such as a** is rejected');
+  assert(redos.benignCompiled, 'A legitimate alternation such as ERROR|WARN still compiles');
+  assertEqual(redos.benignStrategy, 'regexp', 'Legitimate patterns keep regular expression semantics');
+  assert(redos.brokenRejected, 'An unparseable pattern such as (unclosed is rejected');
+  assert(redos.brokenError !== null, 'An unparseable pattern reports the syntax error');
+
+  /* ---- DATA-01: threshold unit classification ------------------------- */
+  const thresholds = await page.evaluate(async () => {
+    const engine = await import('/src/lib/engine/alarmEvaluator.ts');
+    return {
+      networkIn60k: engine.validateThreshold('networkIn', 60_000),
+      networkOut100k: engine.validateThreshold('networkOut', 100_000),
+      networkOutOverCeiling: engine.validateThreshold('networkOut', 200_000_000),
+      cpu101: engine.validateThreshold('cpu', 101),
+      cpu100: engine.validateThreshold('cpu', 100),
+      memory101: engine.validateThreshold('memory', 101),
+      disk101: engine.validateThreshold('disk', 101),
+      latencyOver: engine.validateThreshold('latency', 200_000),
+      latencyOk: engine.validateThreshold('latency', 250),
+      zero: engine.validateThreshold('cpu', 0),
+      negative: engine.validateThreshold('cpu', -1),
+      nan: engine.validateThreshold('cpu', Number.NaN),
+      infinity: engine.validateThreshold('networkIn', Number.POSITIVE_INFINITY),
+      isPctCpu: engine.isPercentageMetric('cpu'),
+      isPctNetwork: engine.isPercentageMetric('networkOut'),
+      isBandwidth: engine.isBandwidthMetric('networkIn')
+    };
+  });
+
+  assertEqual(thresholds.networkIn60k, null, 'validateThreshold accepts 60000 Kbps on networkIn');
+  assertEqual(thresholds.networkOut100k, null, 'validateThreshold accepts 100000 Kbps on networkOut');
+  assert(
+    typeof thresholds.networkOutOverCeiling === 'string',
+    'A bandwidth threshold beyond the 100000000 Kbps ceiling is still rejected'
+  );
+  assert(typeof thresholds.cpu101 === 'string', 'validateThreshold rejects cpu above 100');
+  assertEqual(thresholds.cpu100, null, 'A cpu threshold of exactly 100 is accepted');
+  assert(typeof thresholds.memory101 === 'string', 'validateThreshold rejects memory above 100');
+  assert(typeof thresholds.disk101 === 'string', 'validateThreshold rejects disk above 100');
+  assert(typeof thresholds.latencyOver === 'string', 'A latency threshold beyond 100000ms is rejected');
+  assertEqual(thresholds.latencyOk, null, 'A latency threshold of 250ms is accepted');
+  assert(typeof thresholds.zero === 'string', 'A zero threshold is rejected');
+  assert(typeof thresholds.negative === 'string', 'A negative threshold is rejected');
+  assert(typeof thresholds.nan === 'string', 'A non-finite threshold is rejected');
+  assert(typeof thresholds.infinity === 'string', 'An infinite bandwidth threshold is rejected');
+  assertEqual(thresholds.isPctCpu, true, 'cpu is classified as a percentage metric');
+  assertEqual(thresholds.isPctNetwork, false, 'networkOut is not classified as a percentage metric');
+  assertEqual(thresholds.isBandwidth, true, 'networkIn is classified as a bandwidth metric');
+
+  /* ---- SEC-02: prototype pollution ------------------------------------- */
+  const pollution = await page.evaluate(async () => {
+    delete Object.prototype.polluted;
+
+    const store = await import('/src/lib/stores/monitorStore.svelte.ts');
+    const created = await store.monitorStore.createServer({
+      name: 'redos-probe-asset',
+      hostname: 'redos-probe.internal',
+      ipAddress: '10.9.9.9',
+      region: 'us-east-1',
+      availabilityZone: 'us-east-1a',
+      environment: 'testing',
+      status: 'healthy',
+      description: '',
+      owner: '',
+      provisionedBy: 'manual',
+      cpuCores: 2,
+      memoryGb: 4,
+      diskGb: 20,
+      architecture: 'x86_64',
+      tags: [
+        { key: '__proto__', value: 'polluted' },
+        { key: 'constructor', value: 'polluted' },
+        { key: 'prototype', value: 'polluted' },
+        { key: 'valid', value: 'ok' },
+        { key: 'has spaces', value: 'rejected' },
+        { key: '', value: 'rejected' },
+        { key: '9lives', value: 'ok' },
+        { key: '__PROTO__', value: 'polluted' }
+      ]
+    });
+
+    const tags = created.tags;
+    const ownKeys = Object.keys(tags);
+    const protoTag = tags['__proto__'];
+    const ctorTag = tags['constructor'];
+    const prototypeTag = tags['prototype'];
+    const upperProtoTag = tags['__PROTO__'];
+
+    const result = {
+      ownKeys,
+      prototypeIsNull: Object.getPrototypeOf(tags) === null,
+      validTag: tags['valid'],
+      numericTag: tags['9lives'],
+      hasSpacesDropped: ownKeys.includes('has spaces'),
+      emptyDropped: Object.keys(tags).length,
+      protoTag,
+      ctorTag,
+      prototypeTag,
+      upperProtoTag,
+      globalPolluted: Object.prototype.polluted,
+      globalConstructorPolluted: ({}).polluted,
+      id: created.id
+    };
+
+    await store.monitorStore.deleteServer(created.id);
+    return result;
+  });
+
+  assert(
+    pollution.ownKeys.includes('valid') && pollution.validTag === 'ok',
+    'A legitimate tag is preserved'
+  );
+  assert(pollution.numericTag === 'ok', 'A tag key starting with a digit is preserved');
+  assert(!pollution.hasSpacesDropped, 'A tag key containing spaces is rejected');
+  assertEqual(pollution.ownKeys.length, 2, 'Only the two safe tag keys survive sanitisation');
+  assertEqual(pollution.prototypeIsNull, true, 'The tag dictionary is built with a null prototype');
+  assertEqual(pollution.protoTag, undefined, 'The __proto__ tag key is not defined as an own property');
+  assertEqual(pollution.upperProtoTag, undefined, 'A case-folded __PROTO__ tag key is also rejected');
+  assertEqual(pollution.ctorTag, undefined, 'The constructor tag key is rejected');
+  assertEqual(pollution.prototypeTag, undefined, 'The prototype tag key is rejected');
+  assertEqual(pollution.globalPolluted, undefined, 'Object.prototype is not polluted by a __proto__ tag');
+  assertEqual(pollution.globalConstructorPolluted, undefined, 'Plain objects do not inherit a polluted field');
+
+  /* ---- DATA-03: cascade alarm deletion --------------------------------- */
+  const cascade = await page.evaluate(async () => {
+    const store = await import('/src/lib/stores/monitorStore.svelte.ts');
+    const dbModule = await import('/src/lib/db/index.ts');
+    const engine = await import('/src/lib/engine/alarmEvaluator.ts');
+
+    const created = await store.monitorStore.createServer({
+      name: 'cascade-probe-asset',
+      hostname: 'cascade-probe.internal',
+      ipAddress: '10.9.9.10',
+      region: 'us-east-1',
+      availabilityZone: 'us-east-1b',
+      environment: 'testing',
+      status: 'healthy',
+      description: '',
+      owner: '',
+      provisionedBy: 'manual',
+      cpuCores: 2,
+      memoryGb: 4,
+      diskGb: 20,
+      architecture: 'x86_64',
+      tags: []
+    });
+
+    // The seeded fleet ships two fleet-wide rules, so assert on the delta
+    // rather than an absolute count.
+    const fleetBaseline = await dbModule.db.alarms.where('serverId').equals(engine.FLEET_SCOPE).count();
+
+    const rule = await store.monitorStore.createAlarm({
+      name: 'Cascade probe rule',
+      serverId: created.id,
+      metric: 'cpu',
+      operator: 'GT',
+      threshold: 42,
+      evaluationPeriods: 2,
+      periodSeconds: 10,
+      enabled: true
+    });
+
+    const globalRule = await store.monitorStore.createAlarm({
+      name: 'Cascade probe fleet rule',
+      serverId: engine.FLEET_SCOPE,
+      metric: 'memory',
+      operator: 'GT',
+      threshold: 55,
+      evaluationPeriods: 2,
+      periodSeconds: 10,
+      enabled: true
+    });
+
+    const before = await dbModule.db.alarms.where('serverId').equals(created.id).count();
+    const fleetBefore = await dbModule.db.alarms.where('serverId').equals(engine.FLEET_SCOPE).count();
+
+    await store.monitorStore.deleteServer(created.id);
+
+    const after = await dbModule.db.alarms.where('serverId').equals(created.id).count();
+    const fleetAfter = await dbModule.db.alarms.where('serverId').equals(engine.FLEET_SCOPE).count();
+
+    const result = {
+      id: created.id,
+      before,
+      after,
+      fleetBaseline,
+      fleetBefore,
+      fleetAfter,
+      memoryInState: store.monitorStore.alarms.filter((a) => a.serverId === created.id).length,
+      memoryHasRule: store.monitorStore.alarms.some((a) => a.id === rule.id),
+      memoryKeepsFleet: store.monitorStore.alarms.some((a) => a.id === globalRule.id),
+      serverGone: !store.monitorStore.servers.some((s) => s.id === created.id)
+    };
+
+    await store.monitorStore.deleteAlarm(globalRule.id);
+    return result;
+  });
+
+  assertEqual(cascade.before, 1, 'The probe alarm is persisted against its server before deletion');
+  assertEqual(cascade.after, 0, 'deleteServer removes the server-scoped alarm rules from Dexie');
+  assertEqual(cascade.memoryInState, 0, 'deleteServer drops the server-scoped rules from reactive state');
+  assertEqual(cascade.memoryHasRule, false, 'The deleted rule id is gone from monitorStore.alarms');
+  assertEqual(cascade.serverGone, true, 'The server itself is removed from reactive state');
+  assertEqual(
+    cascade.fleetBefore,
+    cascade.fleetBaseline + 1,
+    'The fleet-scoped probe rule is added alongside the seeded fleet-wide rules'
+  );
+  assertEqual(
+    cascade.fleetAfter,
+    cascade.fleetBefore,
+    'Fleet-wide rules are not collateral damage when a single server is removed'
+  );
+  assertEqual(cascade.memoryKeepsFleet, true, 'Fleet-wide rules survive a single-server deletion');
+
+  /* ---- CODE-01: favicon policy ----------------------------------------- */
+  const favicon = await page.evaluate(() => {
+    const link = document.querySelector('link[rel="icon"]');
+    const href = link?.getAttribute('href') ?? '';
+    // Anything outside the Basic Multilingual Plane would be a raw glyph.
+    const nonAscii = Array.from(href).filter((ch) => ch.codePointAt(0) > 0x2fff);
+    return {
+      present: Boolean(link),
+      isSvg: link?.getAttribute('type') === 'image/svg+xml',
+      hasSvgPayload: href.startsWith('data:image/svg+xml'),
+      hasPathElement: href.includes('%3Cpath') || href.includes('<path'),
+      nonAsciiCount: nonAscii.length,
+      href
+    };
+  });
+
+  assert(favicon.present, 'A favicon link is declared');
+  assertEqual(favicon.isSvg, true, 'The favicon is declared as image/svg+xml');
+  assert(favicon.hasSvgPayload, 'The favicon is an inline SVG data URI');
+  assert(favicon.hasPathElement, 'The favicon is built from geometric SVG path geometry');
+  assertEqual(favicon.nonAsciiCount, 0, 'The favicon data URI contains no raw Unicode glyphs');
+
+  await page.goto(`${BASE_URL}/servers/srv-use1-api-01`, { waitUntil: 'networkidle' });
+  await waitForFleetReady(page);
+  await page.waitForSelector('[data-testid="log-console"]', { timeout: 20_000 });
+
+  /* ---- SEC-01 end-to-end through the rendered console ------------------ */
+  await page.locator('[data-testid="log-search"]').fill('(a+)+$');
+  await page.waitForTimeout(350);
+  const redosUi = await page.evaluate(() => {
+    const error = document.querySelector('[data-testid="log-search-error"]');
+    const degraded = document.querySelector('[data-testid="log-query-degraded"]');
+    return {
+      errorVisible: Boolean(error),
+      degradedVisible: Boolean(degraded),
+      degradedFlag: error?.getAttribute('data-degraded'),
+      lines: document.querySelectorAll('[data-testid="log-line"]').length,
+      frozen: Boolean(document.querySelector('[aria-busy="true"]'))
+    };
+  });
+  assert(redosUi.errorVisible, 'The log console surfaces the rejection for a catastrophic pattern');
+  assertEqual(redosUi.degradedFlag, 'true', 'The rejection is flagged as a degraded fallback');
+  assert(redosUi.degradedVisible, 'The console explains that matching fell back to substring search');
+  assertEqual(redosUi.lines, 0, 'The substring fallback still filters rather than failing open');
+  assertEqual(redosUi.frozen, false, 'The console never enters a busy or stalled state');
+
+  await page.locator('[data-testid="log-clear"]').click();
+  await page.waitForTimeout(300);
+  assert(
+    (await page.locator('[data-testid="log-line"]').count()) > 0,
+    'Clearing the hostile query restores the full log stream'
+  );
+}
+
+/* ------------------------------------------------------------------ */
 /* Phase 5 — page assembly & responsive audit                         */
 /* ------------------------------------------------------------------ */
 
@@ -1514,6 +1862,7 @@ async function main() {
     await waitForFleetReady(phase1Page);
 
     if (maxPhase >= 1) await checkPhase1(phase1Page);
+    await auditPhase1Security(phase1Page);
     if (maxPhase >= 2) await checkPhase2(phase1Page);
 
     if (maxPhase >= 3) await checkPhase3(phase1Page);
@@ -1546,7 +1895,9 @@ async function main() {
     record(false, 'No Vite compile/runtime error overlay was raised', [...new Set(overlays)].join('\n'));
   }
 
-  console.log(`\n\x1b[1mSummary\x1b[0m: ${results.length - failures.length}/${results.length} checks passed`);
+  console.log(
+    `\n\x1b[1mSummary\x1b[0m ${marker(failures.length === 0)} ${results.length - failures.length}/${results.length} checks passed`
+  );
   if (warnings.length) {
     console.log(`\n\x1b[33mConsole diagnostics (${warnings.length}):\x1b[0m`);
     for (const warning of [...new Set(warnings)].slice(0, 25)) console.log(`  - ${warning}`);
@@ -1556,7 +1907,7 @@ async function main() {
     for (const failure of failures) console.log(`  - [${failure.check}] ${failure.message}`);
     process.exitCode = 1;
   } else if (hardFailures === 0) {
-    console.log('\x1b[32mAll checks passed.\x1b[0m');
+    console.log(`\x1b[32m[PASS] All checks passed.\x1b[0m`);
   }
 }
 

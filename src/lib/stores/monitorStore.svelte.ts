@@ -24,7 +24,7 @@ import type {
 } from '$lib/types/monitor';
 import { METRIC_UNITS, extractMetricValue } from '$lib/utils/alarmUtils';
 import { ID_PREFIXES, generateEntityId } from '$lib/utils/id';
-import { summarizeMetricSeries } from '$lib/utils/statistics';
+import { clamp, summarizeMetricSeries } from '$lib/utils/statistics';
 
 const CRITICAL = { cpu: 90, memory: 92, latency: 250 } as const;
 const WARNING = { cpu: 75, memory: 80, latency: 100 } as const;
@@ -39,8 +39,49 @@ const BOOTSTRAP_SAMPLE: MetricDataPoint = {
   latencyMs: 14.5
 };
 
-function clamp(value: number, min: number, max: number): number {
-  return Math.min(max, Math.max(min, value));
+/** Keys that must never be defined on a tag dictionary. */
+const FORBIDDEN_TAG_KEYS: ReadonlySet<string> = new Set(['__proto__', 'constructor', 'prototype']);
+
+/** Tag keys are restricted to word characters, hyphens and dots. */
+const SAFE_TAG_KEY = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+/** Longest accepted tag key and value. */
+const MAX_TAG_KEY_LENGTH = 64;
+const MAX_TAG_VALUE_LENGTH = 256;
+
+/**
+ * Validate a single tag key.
+ *
+ * `Object.fromEntries` happily defines an own `__proto__` property, and a plain
+ * `Record<string, string>` therefore cannot be trusted to reject it. Reserved
+ * names are refused by exact match after a case-fold, and anything outside the
+ * conservative key grammar is refused outright.
+ */
+export function isSafeTagKey(key: string): boolean {
+  const trimmed = key.trim();
+  if (trimmed.length === 0 || trimmed.length > MAX_TAG_KEY_LENGTH) return false;
+  if (FORBIDDEN_TAG_KEYS.has(trimmed.toLowerCase())) return false;
+  return SAFE_TAG_KEY.test(trimmed);
+}
+
+/**
+ * Build a tag dictionary that is structurally incapable of prototype pollution.
+ *
+ * The result is created with a null prototype, so it has no inherited setters,
+ * and every key is checked before assignment. Values are coerced to strings.
+ */
+export function sanitizeTags(
+  tags: ReadonlyArray<{ key: string; value: string }>
+): Record<string, string> {
+  const result: Record<string, string> = Object.create(null) as Record<string, string>;
+
+  for (const tag of tags) {
+    const key = tag.key.trim();
+    if (!isSafeTagKey(key)) continue;
+    result[key] = String(tag.value ?? '').trim().slice(0, MAX_TAG_VALUE_LENGTH);
+  }
+
+  return result;
 }
 
 /**
@@ -454,11 +495,7 @@ class MonitorState {
       availabilityZone: draft.availabilityZone,
       environment: draft.environment,
       status: draft.status,
-      tags: Object.fromEntries(
-        draft.tags
-          .filter((tag) => tag.key.trim().length > 0)
-          .map((tag) => [tag.key.trim(), tag.value.trim()])
-      ),
+      tags: sanitizeTags(draft.tags),
       specs: {
         cpuCores: draft.cpuCores,
         memoryGb: draft.memoryGb,
@@ -508,13 +545,7 @@ class MonitorState {
         patch.provisionedBy === undefined
           ? current.provisionedBy
           : patch.provisionedBy.trim() || undefined,
-      tags: patch.tags
-        ? Object.fromEntries(
-            patch.tags
-              .filter((tag) => tag.key.trim().length > 0)
-              .map((tag) => [tag.key.trim(), tag.value.trim()])
-          )
-        : current.tags,
+      tags: patch.tags ? sanitizeTags(patch.tags) : current.tags,
       specs: {
         cpuCores: patch.cpuCores ?? current.specs.cpuCores,
         memoryGb: patch.memoryGb ?? current.specs.memoryGb,
@@ -529,17 +560,29 @@ class MonitorState {
     return updated;
   }
 
-  /** Remove an asset and every row that belongs to it. */
+  /**
+   * Remove an asset and every row that belongs to it.
+   *
+   * Alarm rules must be swept in the same transaction: leaving them behind
+   * produces rules that reference a server id nothing can resolve, and those
+   * orphans still count towards the active-alarm rollup on the shell.
+   */
   async deleteServer(id: string): Promise<void> {
-    await db.transaction('rw', [db.servers, db.telemetry, db.logs, db.incidents], async () => {
-      await db.servers.delete(id);
-      await db.telemetry.where('serverId').equals(id).delete();
-      await db.logs.where('serverId').equals(id).delete();
-      await db.incidents.where('serverId').equals(id).delete();
-    });
+    await db.transaction(
+      'rw',
+      [db.servers, db.telemetry, db.logs, db.incidents, db.alarms],
+      async () => {
+        await db.servers.delete(id);
+        await db.telemetry.where('serverId').equals(id).delete();
+        await db.logs.where('serverId').equals(id).delete();
+        await db.incidents.where('serverId').equals(id).delete();
+        await db.alarms.where('serverId').equals(id).delete();
+      }
+    );
 
     this.servers = this.servers.filter((server) => server.id !== id);
     this.incidents = this.incidents.filter((incident) => incident.serverId !== id);
+    this.alarms = this.alarms.filter((alarm) => alarm.serverId !== id);
 
     const nextTelemetry = { ...this.activeTelemetry };
     delete nextTelemetry[id];

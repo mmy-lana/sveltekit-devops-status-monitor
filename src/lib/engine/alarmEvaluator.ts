@@ -10,6 +10,7 @@ import {
   deriveIncidentSeverity,
   evaluateThreshold,
   extractMetricValue,
+  METRIC_LABELS,
   METRIC_UNITS
 } from '$lib/utils/alarmUtils';
 import { ID_PREFIXES, generateEntityId } from '$lib/utils/id';
@@ -211,26 +212,73 @@ export function isTerminalStatus(status: IncidentStatus): boolean {
   return status === 'resolved';
 }
 
+/**
+ * Elapsed time for a resolved incident, clamped at zero.
+ *
+ * `resolvedAt` and `startedAt` are written by different code paths, so clock
+ * skew or a manual edit can produce an end earlier than the start. A negative
+ * duration would silently drag the fleet-wide mean below zero.
+ */
+export function resolvedDurationMs(incident: Incident & { resolvedAt: number }): number {
+  return Math.max(0, incident.resolvedAt - incident.startedAt);
+}
+
 /** Mean time to resolve, in milliseconds, over a set of incidents. */
 export function meanTimeToResolve(incidents: readonly Incident[]): number | null {
   const resolved = incidents.filter(
     (incident): incident is Incident & { resolvedAt: number } => incident.resolvedAt !== null
   );
   if (resolved.length === 0) return null;
-  const total = resolved.reduce(
-    (sum, incident) => sum + (incident.resolvedAt as number) - incident.startedAt,
-    0
-  );
-  return Math.round(total / resolved.length);
+  const total = resolved.reduce((sum, incident) => sum + resolvedDurationMs(incident), 0);
+  return Math.max(0, Math.round(total / resolved.length));
 }
 
-/** Validate a threshold against the metric it guards. */
+/**
+ * Metrics whose values are bounded ratios, and therefore capped at 100.
+ * Everything else is a physical quantity with its own ceiling.
+ */
+export const PERCENTAGE_METRICS: readonly AlarmRule['metric'][] = ['cpu', 'memory', 'disk'] as const;
+
+/** Metrics measured in Kbps. */
+export const BANDWIDTH_METRICS: readonly AlarmRule['metric'][] = ['networkIn', 'networkOut'] as const;
+
+/** Inclusive ceiling per metric family, in that metric's own unit. */
+export const METRIC_CEILING: Record<AlarmRule['metric'], number> = {
+  cpu: 100,
+  memory: 100,
+  disk: 100,
+  latency: 100_000,
+  networkIn: 100_000_000,
+  networkOut: 100_000_000
+};
+
+/** True when the metric is a bounded 0-100 ratio. */
+export function isPercentageMetric(metric: AlarmRule['metric']): boolean {
+  return PERCENTAGE_METRICS.includes(metric);
+}
+
+/** True when the metric is a bandwidth channel in Kbps. */
+export function isBandwidthMetric(metric: AlarmRule['metric']): boolean {
+  return BANDWIDTH_METRICS.includes(metric);
+}
+
+/**
+ * Validate a threshold against the metric it guards.
+ *
+ * The ceiling must be selected by explicit membership rather than by exclusion:
+ * an exclusion test silently mis-classifies any metric added later, which is how
+ * bandwidth thresholds came to be rejected as if they were percentages.
+ */
 export function validateThreshold(metric: AlarmRule['metric'], threshold: number): string | null {
   if (!Number.isFinite(threshold)) return 'Threshold must be a finite number';
   if (threshold <= 0) return 'Threshold must be greater than zero';
-  if (metric !== 'latency' && threshold > 100) {
-    return 'Percentage metrics cannot exceed 100';
+
+  const ceiling = METRIC_CEILING[metric];
+  if (isPercentageMetric(metric)) {
+    if (threshold > ceiling) return `${METRIC_LABELS[metric]} must be a percentage and cannot exceed ${ceiling}`;
+  } else if (threshold > ceiling) {
+    return `${METRIC_LABELS[metric]} threshold cannot exceed ${ceiling} ${METRIC_UNITS[metric]}`;
   }
-  if (metric === 'latency' && threshold > 100_000) return 'Latency threshold is unreasonably high';
+
   return null;
 }
