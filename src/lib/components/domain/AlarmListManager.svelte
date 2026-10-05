@@ -125,7 +125,9 @@
 
   const counts = $derived({
     total: alarms.length,
-    ok: alarms.filter((a) => a.state === 'OK').length,
+    // Disabled rules are not being evaluated, so they must not be reported as
+    // healthy; otherwise this toolbar disagrees with the summary card above it.
+    ok: alarms.filter((a) => a.enabled && a.state === 'OK').length,
     alarm: alarms.filter((a) => a.state === 'ALARM' && a.enabled).length,
     pending: alarms.filter((a) => a.state === 'INSUFFICIENT_DATA').length,
     disabled: alarms.filter((a) => !a.enabled).length

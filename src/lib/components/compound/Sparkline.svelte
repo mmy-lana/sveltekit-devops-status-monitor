@@ -59,13 +59,34 @@
   );
   const stroke = $derived(color ?? (hasData ? SPARKLINE_TONE_COLORS[tone] : SPARKLINE_TONE_COLORS.idle));
 
+  /**
+   * Minimum vertical span, in the metric's own units.
+   *
+   * Without this floor a node with near-zero variation (1.8% to 2.0% CPU)
+   * scales two hundredths of a percent across the full 24px height, which
+   * rendered healthy idle hosts as violent mountain peaks.
+   */
+  const MIN_DOMAIN_SPAN = 15;
+
   const domain = $derived.by(() => {
     if (!hasData) return { min: 0, max: 1 };
-    const rawMin = Math.min(...values);
-    const rawMax = Math.max(...values);
-    if (rawMax === rawMin) return { min: rawMin - 1, max: rawMax + 1 };
-    const padValue = (rawMax - rawMin) * 0.15;
-    return { min: rawMin - padValue, max: rawMax + padValue };
+
+    let rawMin = Math.min(...values);
+    let rawMax = Math.max(...values);
+
+    if (rawMax === rawMin) {
+      rawMin = Math.max(0, rawMin - 1);
+      rawMax = rawMax + 1;
+    }
+
+    if (rawMax - rawMin < MIN_DOMAIN_SPAN) {
+      const center = (rawMin + rawMax) / 2;
+      rawMin = Math.max(0, center - MIN_DOMAIN_SPAN / 2);
+      rawMax = rawMin + MIN_DOMAIN_SPAN;
+    }
+
+    const padValue = (rawMax - rawMin) * 0.1;
+    return { min: Math.max(0, rawMin - padValue), max: rawMax + padValue };
   });
 
   const points = $derived.by(() => {

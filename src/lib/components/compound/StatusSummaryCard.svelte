@@ -80,7 +80,12 @@
         {/if}
       </div>
 
-      <p class="tnum mt-1 font-mono text-2xl font-semibold {VALUE_TONE[tone]}">{value}</p>
+      <p
+        data-testid="status-summary-value"
+        class="tnum mt-1 font-mono text-2xl font-semibold {VALUE_TONE[tone]}"
+      >
+        {value}
+      </p>
 
       {#if detail}
         <p class="mt-0.5 text-[11px] leading-snug text-cw-muted">{detail}</p>

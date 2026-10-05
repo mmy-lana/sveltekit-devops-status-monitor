@@ -2729,6 +2729,303 @@ async function auditPhase5DesignSystem(page) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Audit phase 7 — counters, alarm alignment, sparkline damping       */
+/* ------------------------------------------------------------------ */
+
+async function auditPhase7Presentation(page) {
+  section('Audit Phase 7 · Counter Alignment & Sparkline Damping');
+
+  /* ---- UIUX-08: incident "All" pill reports the register total ------- */
+  await page.goto(`${BASE_URL}/incidents`, { waitUntil: 'networkidle' });
+  await waitForFleetReady(page);
+  await page.waitForTimeout(600);
+
+  const incidents = await page.evaluate(async () => {
+    const store = await window.__liveModule('monitorStore.svelte.ts');
+    const monitor = store.monitorStore;
+    const pill = (key) =>
+      Number(
+        document
+          .querySelector(`[data-testid="incident-filter-${key}"] span:last-child`)
+          ?.textContent?.trim() ?? 'NaN'
+      );
+    return {
+      total: monitor.incidents.length,
+      all: pill('all'),
+      open: pill('open'),
+      investigating: pill('investigating'),
+      mitigated: pill('mitigated'),
+      resolved: pill('resolved')
+    };
+  });
+
+  assert(Number.isInteger(incidents.all), `The incident "All" pill renders a number (${incidents.all})`);
+  assert(
+    incidents.all === incidents.total,
+    `The incident "All" pill reports the register total (${incidents.all} vs ${incidents.total})`
+  );
+  assert(incidents.all > 0, 'The incident "All" pill is never reset to zero');
+  assert(
+    incidents.open + incidents.investigating + incidents.mitigated + incidents.resolved ===
+      incidents.total,
+    `Incident per-status pills sum to the register total (${incidents.open}+${incidents.investigating}+${incidents.mitigated}+${incidents.resolved} vs ${incidents.total})`
+  );
+
+  // Filter down and confirm the sentinel still tracks the register, not the view.
+  await page.locator('[data-testid="incident-filter-resolved"]').click();
+  await page.waitForTimeout(350);
+  const filtered = await page.evaluate(() => ({
+    all: Number(
+      document.querySelector('[data-testid="incident-filter-all"] span:last-child')?.textContent?.trim()
+    ),
+    pressed: document
+      .querySelector('[data-testid="incident-filter-resolved"]')
+      ?.getAttribute('aria-pressed')
+  }));
+  assertEqual(filtered.pressed, 'true', 'The status filter pill reflects its pressed state');
+  assertEqual(
+    filtered.all,
+    incidents.total,
+    'The "All" pill keeps tracking the register total while a status filter is active'
+  );
+  await page.locator('[data-testid="incident-filter-all"]').click();
+  await page.waitForTimeout(250);
+
+  /* ---- UIUX-09: alarm toolbar OK count matches the summary card ------ */
+  await page.goto(`${BASE_URL}/alarms`, { waitUntil: 'networkidle' });
+  await waitForFleetReady(page);
+  await page.waitForTimeout(600);
+
+  const alarmCounts = await page.evaluate(async () => {
+    const store = await window.__liveModule('monitorStore.svelte.ts');
+    const monitor = store.monitorStore;
+    const toolbar = (key) =>
+      Number(document.querySelector(`[data-testid="alarm-stat-${key}"]`)?.textContent?.trim() ?? 'NaN');
+    return {
+      toolbarOk: toolbar('ok'),
+      toolbarBreaching: toolbar('breaching'),
+      toolbarPending: toolbar('awaiting-data'),
+      toolbarDisabled: toolbar('disabled'),
+      summaryOk: Number(
+        document
+          .querySelector(
+            '[data-testid="alarm-summary-ok"] [data-testid="status-summary-value"]'
+          )
+          ?.textContent?.trim()
+      ),
+      summaryBreaching: Number(
+        document
+          .querySelector(
+            '[data-testid="alarm-summary-breaching"] [data-testid="status-summary-value"]'
+          )
+          ?.textContent?.trim()
+      ),
+      summaryPending: Number(
+        document
+          .querySelector(
+            '[data-testid="alarm-summary-pending"] [data-testid="status-summary-value"]'
+          )
+          ?.textContent?.trim()
+      ),
+      enabledOk: monitor.alarms.filter((a) => a.enabled && a.state === 'OK').length,
+      allOk: monitor.alarms.filter((a) => a.state === 'OK').length,
+      disabledCount: monitor.alarms.filter((a) => !a.enabled).length
+    };
+  });
+
+  assertEqual(
+    alarmCounts.toolbarOk,
+    alarmCounts.summaryOk,
+    `The alarm toolbar "OK" count matches the "Rules evaluating" card (${alarmCounts.toolbarOk} vs ${alarmCounts.summaryOk})`
+  );
+  assertEqual(
+    alarmCounts.toolbarOk,
+    alarmCounts.enabledOk,
+    'The alarm toolbar "OK" count counts only enabled rules'
+  );
+  assertEqual(
+    alarmCounts.toolbarBreaching,
+    alarmCounts.summaryBreaching,
+    `The breaching counts agree (${alarmCounts.toolbarBreaching} vs ${alarmCounts.summaryBreaching})`
+  );
+  assertEqual(
+    alarmCounts.toolbarPending,
+    alarmCounts.summaryPending,
+    `The awaiting-data counts agree (${alarmCounts.toolbarPending} vs ${alarmCounts.summaryPending})`
+  );
+  assertEqual(
+    alarmCounts.toolbarDisabled,
+    alarmCounts.disabledCount,
+    'The disabled count matches the store'
+  );
+
+  // Disable a rule and prove the two readouts move together.
+  const disabledRule = await page.evaluate(async () => {
+    const store = await window.__liveModule('monitorStore.svelte.ts');
+    const monitor = store.monitorStore;
+    const target = monitor.alarms.find((a) => a.enabled && a.state === 'OK');
+    if (!target) return null;
+    await monitor.setAlarmEnabled(target.id, false);
+    return target.id;
+  });
+  assert(Boolean(disabledRule), 'A rule was disabled for the counter reconciliation probe');
+
+  await page.waitForTimeout(600);
+  const afterDisable = await page.evaluate(() => ({
+    toolbarOk: Number(
+      document.querySelector('[data-testid="alarm-stat-ok"]')?.textContent?.trim()
+    ),
+    summaryOk: Number(
+      document
+        .querySelector(
+          '[data-testid="alarm-summary-ok"] [data-testid="status-summary-value"]'
+        )
+        ?.textContent?.trim()
+    )
+  }));
+  assertEqual(
+    afterDisable.toolbarOk,
+    afterDisable.summaryOk,
+    `Disabling a rule keeps both OK counters in agreement (${afterDisable.toolbarOk} vs ${afterDisable.summaryOk})`
+  );
+
+  await page.evaluate(async (id) => {
+    const store = await window.__liveModule('monitorStore.svelte.ts');
+    await store.monitorStore.setAlarmEnabled(id, true);
+  }, disabledRule);
+  await page.waitForTimeout(400);
+
+  /* ---- UIUX-10: idle noise is damped in the sparkline ----------------- */
+  await page.goto(`${BASE_URL}/`, { waitUntil: 'networkidle' });
+  await waitForFleetReady(page);
+  await page.waitForTimeout(500);
+
+  /*
+   * Exercise the REAL component rather than a mirror of its maths: idle data is
+   * pushed into the live store so the shipped Sparkline renders it, and the
+   * rendered path geometry is measured from the DOM.
+   */
+  const idleRender = await page.evaluate(async () => {
+    const store = await window.__liveModule('monitorStore.svelte.ts');
+    const monitor = store.monitorStore;
+    const server = monitor.servers.find(
+      (item) => item.status !== 'offline' && item.status !== 'maintenance'
+    );
+    if (!server) return { skipped: true };
+
+    window.__probeBackup = monitor.sparklines[server.id] ?? [];
+    monitor.sparklines = {
+      ...monitor.sparklines,
+      [server.id]: [1.8, 1.9, 1.9, 2.0]
+    };
+
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+
+    const svgs = Array.from(document.querySelectorAll('[data-testid="sparkline"]'));
+    const target = svgs.find((svg) => {
+      const row = svg.closest('[data-testid="table-row"], [data-testid="table-card-body"]');
+      return row?.textContent?.includes(server.name);
+    }) ?? svgs[0];
+
+    const path = target?.querySelector('path[stroke]:not([fill-opacity])');
+    const points = (path?.getAttribute('d') ?? '')
+      .split(/[ML]/)
+      .map((seg) => seg.trim())
+      .filter(Boolean)
+      .map((seg) => seg.split(',').map(Number))
+      .filter(([, y]) => Number.isFinite(y));
+
+    const ys = points.map(([, y]) => y);
+    const box = target?.getBoundingClientRect();
+
+    return {
+      skipped: false,
+      pointCount: points.length,
+      delta: ys.length > 0 ? Math.max(...ys) - Math.min(...ys) : null,
+      boxHeight: box ? box.height : null,
+      boxWidth: box ? box.width : null
+    };
+  });
+
+  assert(!idleRender.skipped, 'A reporting host was available for the sparkline probe');
+  assertEqual(idleRender.pointCount, 4, 'The idle series renders one point per sample');
+  assert(
+    idleRender.boxHeight === 24 && idleRender.boxWidth === 80,
+    `The sparkline renders at the 80x24 spec (${Math.round(idleRender.boxWidth)}x${Math.round(
+      idleRender.boxHeight
+    )})`
+  );
+  assert(
+    idleRender.delta !== null && idleRender.delta < 6,
+    `Idle noise spans under 6px of the 24px height (${idleRender.delta.toFixed(2)}px)`
+  );
+
+  // A genuinely busy host must still produce a visibly taller trace.
+  const busyRender = await page.evaluate(async () => {
+    const store = await window.__liveModule('monitorStore.svelte.ts');
+    const monitor = store.monitorStore;
+    const server = monitor.servers.find(
+      (item) => item.status !== 'offline' && item.status !== 'maintenance'
+    );
+    if (!server) return null;
+
+    monitor.sparklines = {
+      ...monitor.sparklines,
+      [server.id]: [12, 88, 31, 74, 46]
+    };
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+
+    const svgs = Array.from(document.querySelectorAll('[data-testid="sparkline"]'));
+    const target = svgs.find((svg) => {
+      const row = svg.closest('[data-testid="table-row"], [data-testid="table-card-body"]');
+      return row?.textContent?.includes(server.name);
+    }) ?? svgs[0];
+
+    const path = target?.querySelector('path[stroke]:not([fill-opacity])');
+    const ys = (path?.getAttribute('d') ?? '')
+      .split(/[ML]/)
+      .map((seg) => seg.trim())
+      .filter(Boolean)
+      .map((seg) => seg.split(',').map(Number))
+      .filter(([, y]) => Number.isFinite(y))
+      .map(([, y]) => y);
+
+    return ys.length > 0 ? Math.max(...ys) - Math.min(...ys) : null;
+  });
+
+  assert(busyRender !== null, 'A busy trace was rendered for comparison');
+  assert(
+    busyRender > idleRender.delta + 8,
+    `A busy host renders a visibly taller trace than an idle one (${busyRender.toFixed(
+      2
+    )}px vs ${idleRender.delta.toFixed(2)}px)`
+  );
+
+  // Restore the real telemetry so later suites see genuine data.
+  await page.evaluate(async () => {
+    const store = await window.__liveModule('monitorStore.svelte.ts');
+    await store.monitorStore.refreshSparklines();
+  });
+  await page.waitForTimeout(300);
+
+  // Live proof: every rendered sparkline path must stay inside its box.
+  const liveSpans = await page.evaluate(() =>
+    Array.from(document.querySelectorAll('[data-testid="sparkline"] path')).map((path) => {
+      const box = path.getBoundingClientRect();
+      return {
+        height: Math.round(box.height),
+        svgHeight: 24
+      };
+    })
+  );
+  assert(liveSpans.length > 0, `Live sparkline paths were measured (${liveSpans.length})`);
+  assert(
+    liveSpans.every((s) => s.height <= s.svgHeight),
+    'No live sparkline path exceeds the 24px render box'
+  );
+}
+
+/* ------------------------------------------------------------------ */
 /* Audit phase 6 — telemetry drift, fleet isolation, reconciliation   */
 /* ------------------------------------------------------------------ */
 
@@ -3592,6 +3889,7 @@ async function main() {
     await auditPhase4Presentation(phase1Page);
     await auditPhase5DesignSystem(phase1Page);
     await auditPhase6TelemetryIntegrity(phase1Page);
+    await auditPhase7Presentation(phase1Page);
 
     if (maxPhase >= 3) await checkPhase3(phase1Page);
 

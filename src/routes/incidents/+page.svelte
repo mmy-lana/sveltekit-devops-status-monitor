@@ -67,10 +67,18 @@
     drawerOpen = true;
   }
 
+  /**
+   * Per-status counts for the filter pills.
+   *
+   * `statusFilters` itself carries the 'all' sentinel, so zero-filling from that
+   * list would immediately overwrite the register total. The sentinel is
+   * therefore assigned once every per-status counter has been tallied.
+   */
   const statusCounts = $derived.by(() => {
-    const map = new Map<IncidentFilter, number>([['all', incidents.length]]);
+    const map = new Map<IncidentFilter, number>();
     for (const filter of statusFilters) map.set(filter.value, 0);
     for (const incident of incidents) map.set(incident.status, (map.get(incident.status) ?? 0) + 1);
+    map.set('all', incidents.length);
     return map;
   });
 </script>
