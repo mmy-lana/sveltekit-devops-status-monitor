@@ -176,7 +176,6 @@
 </script>
 
 <script lang="ts">
-  import Badge from '#lib/components/primitives/Badge.svelte';
   import Button from '#lib/components/primitives/Button.svelte';
   import Input from '#lib/components/primitives/Input.svelte';
   import Select from '#lib/components/primitives/Select.svelte';
@@ -447,24 +446,23 @@
               "HEALhealthy". The selected status is rendered by the control
               itself, and the live preview lives directly below the field.
             -->
-            <div class="flex flex-col gap-1.5">
-              <Select
-                label="Lifecycle status"
-                name="asset-status"
-                testId="asset-status"
-                options={STATUS_OPTIONS.map((value) => ({
-                  value,
-                  label: value.charAt(0).toUpperCase() + value.slice(1)
-                }))}
-                value={draft.status}
-                onchange={(event) => field('status', event.currentTarget.value as ServerStatus)}
-              />
-              <!-- Live preview sits below the control, clear of the rendered value. -->
-              <p class="flex items-center gap-1.5 text-[11px] text-cw-faint" data-testid="asset-status-preview">
-                Selected
-                <Badge variant="status" size="sm" value={draft.status} />
-              </p>
-            </div>
+            <!--
+              No adornment and no preview row here: both misaligned this field
+              against its neighbours. The selected lifecycle state is already
+              communicated by the capitalised option text in the control, and
+              the Badge preview lives in the instance table and detail view.
+            -->
+            <Select
+              label="Lifecycle status"
+              name="asset-status"
+              testId="asset-status"
+              options={STATUS_OPTIONS.map((value) => ({
+                value,
+                label: value.charAt(0).toUpperCase() + value.slice(1)
+              }))}
+              value={draft.status}
+              onchange={(event) => field('status', event.currentTarget.value as ServerStatus)}
+            />
             <Input
               label="Owner"
               name="asset-owner"
@@ -558,7 +556,9 @@
             Tags
           </legend>
           {#each draft.tags as tag, index (index)}
-            <div class="flex items-center gap-2">
+            <!-- items-end baselines the delete button with the input box itself
+                 rather than centring it across the 65px label+control stack. -->
+            <div class="flex items-end gap-2">
               <Input
                 label={`Tag ${index + 1} key`}
                 name={`asset-tag-key-${index}`}

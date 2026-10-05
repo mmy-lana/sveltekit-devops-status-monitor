@@ -162,15 +162,39 @@
       <Select label="Region" name="region-filter" testId="region-filter" options={regionOptions} bind:value={region} />
     </div>
 
-    <div class="w-full shrink-0 sm:w-48">
-      <Select
-        label="Sort by"
-        name="sort-by"
-        testId="sort-select"
-        options={sortOptions}
-        value={sortBy}
-        onchange={(event) => selectSort(event.currentTarget.value as SortKey)}
-      />
+    <!-- Sort column and its direction toggle travel together; splitting them
+         across the two toolbar rows put the direction control a full row away
+         from the column it modifies. -->
+    <div class="flex w-full shrink-0 items-end gap-1.5 sm:w-auto">
+      <div class="w-full sm:w-48">
+        <Select
+          label="Sort by"
+          name="sort-by"
+          testId="sort-select"
+          options={sortOptions}
+          value={sortBy}
+          onchange={(event) => selectSort(event.currentTarget.value as SortKey)}
+        />
+      </div>
+      <Button
+        variant="icon"
+        size="md"
+        testId="sort-direction"
+        ariaLabel={sortDirection === 'asc'
+          ? 'Sorted ascending, activate to sort descending'
+          : 'Sorted descending, activate to sort ascending'}
+        title={sortDirection === 'asc' ? 'Ascending' : 'Descending'}
+        onclick={() => (sortDirection = sortDirection === 'asc' ? 'desc' : 'asc')}
+      >
+        <svg
+          viewBox="0 0 16 16"
+          class="h-4 w-4 transition-transform {sortDirection === 'asc' ? '' : 'rotate-180'}"
+          fill="currentColor"
+          aria-hidden="true"
+        >
+          <path d="M8 3.2 11.6 8H4.4L8 3.2ZM4.4 9.2h7.2L8 14 4.4 9.2Z" />
+        </svg>
+      </Button>
     </div>
 
     {#if children}
@@ -208,24 +232,6 @@
         </button>
       {/each}
     </div>
-
-    <Button
-      variant="icon"
-      size="md"
-      testId="sort-direction"
-      ariaLabel={sortDirection === 'asc' ? 'Sorted ascending, activate to sort descending' : 'Sorted descending, activate to sort ascending'}
-      title={sortDirection === 'asc' ? 'Ascending' : 'Descending'}
-      onclick={() => (sortDirection = sortDirection === 'asc' ? 'desc' : 'asc')}
-    >
-      <svg
-        viewBox="0 0 16 16"
-        class="h-4 w-4 transition-transform {sortDirection === 'asc' ? '' : 'rotate-180'}"
-        fill="currentColor"
-        aria-hidden="true"
-      >
-        <path d="M8 3.2 11.6 8H4.4L8 3.2ZM4.4 9.2h7.2L8 14 4.4 9.2Z" />
-      </svg>
-    </Button>
 
     <Button
       variant="ghost"

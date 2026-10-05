@@ -2650,46 +2650,40 @@ async function auditPhase5DesignSystem(page) {
     `The select reserves room for its affordances (padding ${selectProbe.padLeft}/${selectProbe.padRight})`
   );
 
-  // And the relocated preview must not overlap the control.
-  const previewClearance = await page.evaluate(() => {
+  // The status field carries no adornment and no preview row, so the control
+  // renders its own value and nothing can collide with it.
+  const bare = await page.evaluate(() => {
     const select = document.querySelector('[data-testid="asset-status"]');
-    const preview = document.querySelector('[data-testid="asset-status-preview"]');
-    if (!select || !preview) return null;
-    const a = select.getBoundingClientRect();
-    const b = preview.getBoundingClientRect();
-    return { selectBottom: a.bottom, previewTop: b.top, previewText: preview.textContent?.replace(/\s+/g, ' ').trim() };
+    const control = select?.closest('div');
+    return {
+      previewRows: document.querySelectorAll('[data-testid="asset-status-preview"]').length,
+      badgesInControl: control?.querySelectorAll('[data-testid="badge"]').length ?? 0,
+      svgsInControl: control?.querySelectorAll('svg').length ?? 0
+    };
   });
-  assert(Boolean(previewClearance), 'The relocated status preview is rendered');
-  assert(
-    previewClearance.previewTop >= previewClearance.selectBottom,
-    `The status preview sits clear of the select control (${Math.round(
-      previewClearance.previewTop
-    )} >= ${Math.round(previewClearance.selectBottom)})`
-  );
-  assert(
-    /Healthy/i.test(previewClearance.previewText ?? ''),
-    `The preview reflects the current selection (${previewClearance.previewText})`
-  );
 
-  // Change the selection and confirm the preview follows without overlapping.
+  assertEqual(bare.previewRows, 0, 'No status preview row is rendered beneath the control');
+  assertEqual(bare.badgesInControl, 0, 'No badge competes with the rendered value');
+  assertEqual(bare.svgsInControl, 1, 'The control renders only its chevron affordance');
+
+  // The control must still update cleanly on selection.
   await page.locator('[data-testid="asset-status"]').selectOption('critical');
   await page.waitForTimeout(300);
   const updated = await page.evaluate(() => {
     const select = document.querySelector('[data-testid="asset-status"]');
-    const preview = document.querySelector('[data-testid="asset-status-preview"]');
-    const a = select.getBoundingClientRect();
-    const b = preview.getBoundingClientRect();
     return {
       value: select.value,
       selectedText: select.options[select.selectedIndex]?.textContent?.trim(),
-      overlap: b.top < a.bottom,
-      previewText: preview.textContent?.replace(/\s+/g, ' ').trim()
+      previewRows: document.querySelectorAll('[data-testid="asset-status-preview"]').length
     };
   });
   assertEqual(updated.value, 'critical', 'The lifecycle status updates on selection');
-  assertEqual(updated.selectedText, 'Critical', 'The selected value renders as a single capitalized word');
-  assertEqual(updated.overlap, false, 'The preview never overlaps the control after a change');
-  assert(/Critical/i.test(updated.previewText ?? ''), 'The preview follows the new selection');
+  assertEqual(
+    updated.selectedText,
+    'Critical',
+    'The selected value renders as a single capitalized word'
+  );
+  assertEqual(updated.previewRows, 0, 'No preview row reappears after a selection change');
 
   await page.locator('[data-testid="asset-close"]').click();
   await page.waitForTimeout(300);
@@ -2726,6 +2720,286 @@ async function auditPhase5DesignSystem(page) {
   assertEqual(stillWorks.heading, 'Fleet Overview', 'The dashboard still renders after the module migration');
   assertEqual(stillWorks.pills, 6, 'The status pills still resolve after the module migration');
   assert(stillWorks.rows > 0 || stillWorks.cards > 0, 'The fleet table still renders after the module migration');
+}
+
+/* ------------------------------------------------------------------ */
+/* Audit phase 8 — form ergonomics and toolbar grouping                */
+/* ------------------------------------------------------------------ */
+
+async function auditPhase8Ergonomics(page) {
+  section('Audit Phase 8 · Form Ergonomics & Toolbar Grouping');
+
+  /* ---- UIUX-12: sort direction pairs with the sort select ------------- */
+  await page.goto(`${BASE_URL}/`, { waitUntil: 'networkidle' });
+  await waitForFleetReady(page);
+  await page.waitForTimeout(500);
+
+  const sortGrouping = await page.evaluate(() => {
+    const select = document.querySelector('[data-testid="sort-select"]');
+    const toggle = document.querySelector('[data-testid="sort-direction"]');
+    if (!select || !toggle) return { missing: true };
+
+    const group = toggle.parentElement;
+    const toolbar = document.querySelector('[data-testid="filter-toolbar"]');
+    const rows = Array.from(toolbar?.children ?? []);
+
+    const rowOf = (el) => {
+      let node = el;
+      while (node && node !== toolbar) {
+        if (rows.includes(node)) return rows.indexOf(node);
+        node = node.parentElement;
+      }
+      return -1;
+    };
+
+    const selectRow = rowOf(select);
+    const toggleRow = rowOf(toggle);
+
+    // Distance from the select to the toggle must be small: they are siblings.
+    const selectBox = select.getBoundingClientRect();
+    const toggleBox = toggle.getBoundingClientRect();
+    const gap = Math.round(toggleBox.left - selectBox.right);
+
+    const reset = document.querySelector('[data-testid="filter-reset"]');
+    return {
+      missing: false,
+      sameParent: select.parentElement === toggle.parentElement?.querySelector('div') || select.closest('div') === toggle.parentElement,
+      sharesGroup: group?.contains(select) ?? false,
+      selectRow,
+      toggleRow,
+      gap,
+      resetRow: reset ? rowOf(reset) : -1,
+      toggleHeight: Math.round(toggleBox.height)
+    };
+  });
+
+  assert(!sortGrouping.missing, 'Both the sort select and its direction toggle are rendered');
+  assertEqual(
+    sortGrouping.selectRow,
+    sortGrouping.toggleRow,
+    `The sort direction toggle sits in the same toolbar row as the sort select (rows ${sortGrouping.selectRow}/${sortGrouping.toggleRow})`
+  );
+  assert(
+    sortGrouping.sharesGroup,
+    'The sort direction toggle is grouped with the sort select in one container'
+  );
+  assert(
+    sortGrouping.gap >= 0 && sortGrouping.gap <= 24,
+    `The direction toggle sits immediately beside the select with a small gap (${sortGrouping.gap}px)`
+  );
+  assertEqual(sortGrouping.toggleRow, 0, 'The sort controls live in the first toolbar row');
+
+  // Row 2 now carries only the status pills and reset.
+  const rowTwo = await page.evaluate(() => {
+    const toolbar = document.querySelector('[data-testid="filter-toolbar"]');
+    const rows = Array.from(toolbar?.children ?? []);
+    const second = rows[1];
+    if (!second) return null;
+    return {
+      hasPills: Boolean(second.querySelector('[data-testid="status-pills"]')),
+      hasReset: Boolean(second.querySelector('[data-testid="filter-reset"]')),
+      hasSortToggle: Boolean(second.querySelector('[data-testid="sort-direction"]')),
+      testIds: Array.from(second.querySelectorAll('[data-testid]')).map((el) =>
+        el.getAttribute('data-testid')
+      )
+    };
+  });
+
+  assertEqual(rowTwo.hasPills, true, 'The second toolbar row holds the status filter pills');
+  assertEqual(rowTwo.hasReset, true, 'The second toolbar row holds the reset button');
+  assertEqual(rowTwo.hasSortToggle, false, 'The sort direction toggle no longer lives in the second row');
+
+  // The pairing must hold at every required viewport.
+  for (const width of [360, 390, 430, 768, 1280, 1600]) {
+    await page.setViewportSize({ width, height: 820 });
+    await page.waitForTimeout(260);
+
+    const geometry = await page.evaluate(() => {
+      const select = document.querySelector('[data-testid="sort-select"]')?.getBoundingClientRect();
+      const toggle = document.querySelector('[data-testid="sort-direction"]')?.getBoundingClientRect();
+      const toolbar = document.querySelector('[data-testid="filter-toolbar"]');
+      const rows = Array.from(toolbar?.children ?? []);
+      const rowOf = (el) => {
+        let node = el;
+        while (node && node !== toolbar) {
+          if (rows.includes(node)) return rows.indexOf(node);
+          node = node.parentElement;
+        }
+        return -1;
+      };
+      const selectEl = document.querySelector('[data-testid="sort-select"]');
+      const toggleEl = document.querySelector('[data-testid="sort-direction"]');
+      return {
+        selectRow: selectEl ? rowOf(selectEl) : -1,
+        toggleRow: toggleEl ? rowOf(toggleEl) : -1,
+        overlap:
+          select && toggle
+            ? !(select.right <= toggle.left + 1 || toggle.right <= select.left + 1)
+            : false,
+        docWidth: document.documentElement.clientWidth,
+        scrollWidth: document.documentElement.scrollWidth
+      };
+    });
+
+    assertEqual(
+      geometry.selectRow,
+      geometry.toggleRow,
+      `[${width}px] The sort direction toggle shares the select's toolbar row`
+    );
+    assertEqual(geometry.overlap, false, `[${width}px] The sort select and toggle do not overlap`);
+    assert(
+      geometry.scrollWidth <= geometry.docWidth + 1,
+      `[${width}px] The regrouped toolbar introduces no horizontal overflow`
+    );
+  }
+
+  /* ---- UIUX-11: modal symmetry and tag baseline ---------------------- */
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.goto(`${BASE_URL}/`, { waitUntil: 'networkidle' });
+  await waitForFleetReady(page);
+  await page.waitForTimeout(400);
+
+  await page.locator('[data-testid="asset-create"]').click();
+  await page.waitForTimeout(450);
+  assert((await page.locator('[data-testid="asset-form"]').count()) > 0, 'The asset modal opens');
+
+  assertEqual(
+    await page.locator('[data-testid="asset-status-preview"]').count(),
+    0,
+    'The redundant status preview row no longer exists'
+  );
+
+  const symmetry = await page.evaluate(() => {
+    const select = document.querySelector('[data-testid="asset-status"]');
+    const owner = document.querySelector('[data-testid="asset-owner"]');
+    if (!select || !owner) return { missing: true };
+
+    const labelBox = (el) => {
+      const id = el.id;
+      const label = document.querySelector(`label[for="${id}"]`);
+      return label ? label.getBoundingClientRect().top : null;
+    };
+
+    return {
+      missing: false,
+      selectLabelTop: labelBox(select),
+      ownerLabelTop: labelBox(owner),
+      selectControlTop: select.getBoundingClientRect().top,
+      ownerControlTop: owner.getBoundingClientRect().top,
+      badgesInsideForm: document.querySelectorAll(
+        '[data-testid="asset-form"] [data-testid="badge"]'
+      ).length
+    };
+  });
+
+  assert(!symmetry.missing, 'Both adjacent form fields are rendered');
+  assert(
+    Math.abs(symmetry.selectLabelTop - symmetry.ownerLabelTop) < 2,
+    `The lifecycle status label aligns with the adjacent field (${symmetry.selectLabelTop} vs ${symmetry.ownerLabelTop})`
+  );
+  assert(
+    Math.abs(symmetry.selectControlTop - symmetry.ownerControlTop) < 2,
+    `The lifecycle status control aligns with the adjacent control (${symmetry.selectControlTop} vs ${symmetry.ownerControlTop})`
+  );
+
+  const selectClean = await page.evaluate(() => {
+    const select = document.querySelector('[data-testid="asset-status"]');
+    const control = select.closest('div');
+    return {
+      badges: control.querySelectorAll('[data-testid="badge"]').length,
+      srOnlySvgs: control.querySelectorAll('.sr-only svg').length,
+      value: select.options[select.selectedIndex]?.textContent?.trim()
+    };
+  });
+  assertEqual(selectClean.badges, 0, 'No badge is rendered inside the lifecycle status control');
+  assertEqual(selectClean.srOnlySvgs, 0, 'No sr-only glyph is rendered inside the control');
+  assertEqual(selectClean.value, 'Healthy', 'The control renders its own capitalised value');
+
+  // Tag rows: the remove button must baseline with the input, not float.
+  const tagGeometry = await page.evaluate(() => {
+    const remove = document.querySelector('[data-testid^="asset-tag-remove-"]');
+    if (!remove) return { missing: true };
+
+    const row = remove.closest('div');
+    const inputs = Array.from(row.querySelectorAll('input'));
+    const removeBox = remove.getBoundingClientRect();
+    const inputBoxes = inputs.map((el) => el.getBoundingClientRect());
+
+    return {
+      missing: false,
+      removeBottom: removeBox.bottom,
+      removeHeight: removeBox.height,
+      inputBottoms: inputBoxes.map((b) => b.bottom),
+      inputTops: inputBoxes.map((b) => b.top),
+      rowAlign: getComputedStyle(row).alignItems
+    };
+  });
+
+  assert(!tagGeometry.missing, 'A tag remove control is rendered');
+  assertEqual(
+    tagGeometry.rowAlign,
+    'flex-end',
+    'The tag row uses items-end so the delete button baselines with the input'
+  );
+  assertEqual(
+    tagGeometry.removeHeight,
+    44,
+    `The tag delete button still clears the 44px tap target (${tagGeometry.removeHeight}px)`
+  );
+  tagGeometry.inputBottoms.forEach((bottom, index) => {
+    assert(
+      Math.abs(tagGeometry.removeBottom - bottom) <= 2,
+      `Tag ${index} input bottom aligns with the delete button (${Math.round(
+        tagGeometry.removeBottom
+      )} vs ${Math.round(bottom)})`
+    );
+  });
+
+  // Behavioural proof: adding a tag keeps every row aligned.
+  await page.locator('[data-testid="asset-tag-add"]').click();
+  await page.waitForTimeout(300);
+  const multiTag = await page.evaluate(() => {
+    const removes = Array.from(document.querySelectorAll('[data-testid^="asset-tag-remove-"]'));
+    const rows = removes.map((remove) => {
+      const row = remove.closest('div');
+      const removeBox = remove.getBoundingClientRect();
+      const inputs = Array.from(row.querySelectorAll('input')).map((el) => el.getBoundingClientRect());
+      return {
+        removeBottom: removeBox.bottom,
+        inputBottoms: inputs.map((b) => b.bottom)
+      };
+    });
+    return { count: rows.length, rows };
+  });
+
+  assertEqual(multiTag.count, 2, 'A second tag row is rendered');
+  for (const [index, row] of multiTag.rows.entries()) {
+    for (const bottom of row.inputBottoms) {
+      assert(
+        Math.abs(row.removeBottom - bottom) <= 2,
+        `Tag row ${index} keeps its delete button aligned with the inputs`
+      );
+    }
+  }
+
+  // The form must still validate and submit correctly after the layout change.
+  await page.locator('[data-testid="asset-name"]').fill('phase3-layout-probe');
+  await page.locator('[data-testid="asset-ip"]').fill('10.9.9.30');
+  await page.locator('[data-testid="asset-hostname"]').fill('p3-probe.internal');
+  await page.locator('[data-testid="asset-status"]').selectOption('maintenance');
+  await page.waitForTimeout(250);
+  const modalNesting = await page.evaluate(
+    () => document.querySelectorAll('a a, a button, button button').length
+  );
+  assertEqual(modalNesting, 0, 'The reworked modal still contains no nested interactive elements');
+
+  await page.locator('[data-testid="asset-close"]').click();
+  await page.waitForTimeout(350);
+  assertEqual(
+    await page.locator('[data-testid="asset-form"]').count(),
+    0,
+    'The modal still dismisses cleanly after the layout change'
+  );
 }
 
 /* ------------------------------------------------------------------ */
@@ -3890,6 +4164,7 @@ async function main() {
     await auditPhase5DesignSystem(phase1Page);
     await auditPhase6TelemetryIntegrity(phase1Page);
     await auditPhase7Presentation(phase1Page);
+    await auditPhase8Ergonomics(phase1Page);
 
     if (maxPhase >= 3) await checkPhase3(phase1Page);
 
