@@ -4,7 +4,7 @@
  * Every function in this module is side-effect free and safe to call from
  * Svelte 5 `$derived` computations. No DOM, no timers, no randomness.
  */
-import type { MetricSeries, MetricType, MetricUnit } from '$lib/types/monitor';
+import type { MetricSeries, MetricType, MetricUnit } from '#lib/types/monitor';
 
 /**
  * Trailing moving average.

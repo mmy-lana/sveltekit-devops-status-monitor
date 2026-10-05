@@ -11,12 +11,29 @@
     "strict": true,
     "moduleResolution": "bundler",
     "paths": {
-      "$lib": ["./src/lib"],
-      "$lib/*": ["./src/lib/*"]
+      "#lib": [
+        "./src/lib"
+      ],
+      "#lib/*": [
+        "./src/lib/*"
+      ]
     },
     "noUncheckedIndexedAccess": false,
-    "types": ["$app/types", "vite/client"]
+    "types": [
+      "$app/types",
+      "vite/client"
+    ]
   },
-  "include": ["src", "*"],
-  "exclude": ["scripts", "src/service-worker", "node_modules", ".svelte-kit", "build", "dist"]
+  "include": [
+    "src",
+    "*"
+  ],
+  "exclude": [
+    "scripts",
+    "src/service-worker",
+    "node_modules",
+    ".svelte-kit",
+    "build",
+    "dist"
+  ]
 }

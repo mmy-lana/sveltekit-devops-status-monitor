@@ -1,19 +1,19 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { page } from '$app/state';
-  import Badge from '$lib/components/primitives/Badge.svelte';
-  import Button from '$lib/components/primitives/Button.svelte';
-  import Card from '$lib/components/primitives/Card.svelte';
-  import ServerDetailMetrics from '$lib/components/domain/ServerDetailMetrics.svelte';
-  import LogConsole from '$lib/components/compound/LogConsole.svelte';
-  import StatusSummaryCard from '$lib/components/compound/StatusSummaryCard.svelte';
-  import RefreshRateDropdown from '$lib/components/compound/RefreshRateDropdown.svelte';
-  import { monitorStore } from '$lib/stores/monitorStore.svelte';
-  import { db, getLogsForServer } from '$lib/db';
-  import { FLEET_SCOPE } from '$lib/engine/alarmEvaluator';
-  import { describeThreshold } from '$lib/utils/alarmUtils';
-  import { durationForTimeRange, formatRelativeTime } from '$lib/utils/formatting';
-  import type { AlarmRule, LogEntry, MetricType, TimeRangeValue } from '$lib/types/monitor';
+  import Badge from '#lib/components/primitives/Badge.svelte';
+  import Button from '#lib/components/primitives/Button.svelte';
+  import Card from '#lib/components/primitives/Card.svelte';
+  import ServerDetailMetrics from '#lib/components/domain/ServerDetailMetrics.svelte';
+  import LogConsole from '#lib/components/compound/LogConsole.svelte';
+  import StatusSummaryCard from '#lib/components/compound/StatusSummaryCard.svelte';
+  import RefreshRateDropdown from '#lib/components/compound/RefreshRateDropdown.svelte';
+  import { monitorStore } from '#lib/stores/monitorStore.svelte';
+  import { db, getLogsForServer } from '#lib/db';
+  import { FLEET_SCOPE } from '#lib/engine/alarmEvaluator';
+  import { describeThreshold } from '#lib/utils/alarmUtils';
+  import { durationForTimeRange, formatRelativeTime } from '#lib/utils/formatting';
+  import type { AlarmRule, LogEntry, MetricType, TimeRangeValue } from '#lib/types/monitor';
 
   const serverId = $derived(page.params.id ?? '');
 

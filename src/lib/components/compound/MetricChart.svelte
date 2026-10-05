@@ -1,5 +1,5 @@
 <script lang="ts" module>
-  import type { MetricSeries } from '$lib/types/monitor';
+  import type { MetricSeries } from '#lib/types/monitor';
 
   /** Optional threshold rules drawn as horizontal guides with a label. */
   export interface ChartThreshold {
@@ -48,7 +48,7 @@
 </script>
 
 <script lang="ts">
-  import { calculateMax, calculateMin } from '$lib/utils/statistics';
+  import { calculateMax, calculateMin } from '#lib/utils/statistics';
 
   let {
     series,

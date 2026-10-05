@@ -5,7 +5,7 @@ import type {
   MetricDataPoint,
   MetricType,
   MetricUnit
-} from '$lib/types/monitor';
+} from '#lib/types/monitor';
 
 /**
  * Threshold comparison semantics for CloudWatch-style alarm rules.

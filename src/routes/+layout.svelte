@@ -2,9 +2,9 @@
   import '../app.css';
   import { onMount } from 'svelte';
   import { page } from '$app/state';
-  import { monitorStore } from '$lib/stores/monitorStore.svelte';
-  import Badge from '$lib/components/primitives/Badge.svelte';
-  import Button from '$lib/components/primitives/Button.svelte';
+  import { monitorStore } from '#lib/stores/monitorStore.svelte';
+  import Badge from '#lib/components/primitives/Badge.svelte';
+  import Button from '#lib/components/primitives/Button.svelte';
 
   interface Props {
     children: import('svelte').Snippet;

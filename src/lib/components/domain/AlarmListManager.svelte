@@ -5,7 +5,7 @@
     AlarmState,
     ServerAsset,
     ValidationErrors
-  } from '$lib/types/monitor';
+  } from '#lib/types/monitor';
 
   export interface AlarmListManagerProps {
     /** Alarm rules across the fleet. */
@@ -88,15 +88,15 @@
 </script>
 
 <script lang="ts">
-  import { FLEET_SCOPE, describeRule, thresholdSummary, validateThreshold } from '$lib/engine/alarmEvaluator';
-  import Badge from '$lib/components/primitives/Badge.svelte';
-  import Button from '$lib/components/primitives/Button.svelte';
-  import Card from '$lib/components/primitives/Card.svelte';
-  import Input from '$lib/components/primitives/Input.svelte';
-  import Select from '$lib/components/primitives/Select.svelte';
-  import Table, { type TableColumn } from '$lib/components/primitives/Table.svelte';
-  import { METRIC_LABELS, METRIC_ORDER, METRIC_UNITS, OPERATOR_ORDER, OPERATOR_SYMBOLS } from '$lib/utils/alarmUtils';
-  import { formatRelativeTime } from '$lib/utils/formatting';
+  import { FLEET_SCOPE, describeRule, thresholdSummary, validateThreshold } from '#lib/engine/alarmEvaluator';
+  import Badge from '#lib/components/primitives/Badge.svelte';
+  import Button from '#lib/components/primitives/Button.svelte';
+  import Card from '#lib/components/primitives/Card.svelte';
+  import Input from '#lib/components/primitives/Input.svelte';
+  import Select from '#lib/components/primitives/Select.svelte';
+  import Table, { type TableColumn } from '#lib/components/primitives/Table.svelte';
+  import { METRIC_LABELS, METRIC_ORDER, METRIC_UNITS, OPERATOR_ORDER, OPERATOR_SYMBOLS } from '#lib/utils/alarmUtils';
+  import { formatRelativeTime } from '#lib/utils/formatting';
 
   let {
     alarms,

@@ -1,5 +1,5 @@
 <script lang="ts" module>
-  import type { Incident, IncidentSeverity, IncidentStatus } from '$lib/types/monitor';
+  import type { Incident, IncidentSeverity, IncidentStatus } from '#lib/types/monitor';
 
   export interface IncidentTimelineDrawerProps {
     /** Incident under inspection. The drawer stays mounted but inert when null. */
@@ -31,10 +31,10 @@
 </script>
 
 <script lang="ts">
-  import { nextIncidentStatuses, isTerminalStatus } from '$lib/engine/alarmEvaluator';
-  import Badge from '$lib/components/primitives/Badge.svelte';
-  import Button from '$lib/components/primitives/Button.svelte';
-  import { formatDateTime, formatDuration, formatRelativeTime } from '$lib/utils/formatting';
+  import { nextIncidentStatuses, isTerminalStatus } from '#lib/engine/alarmEvaluator';
+  import Badge from '#lib/components/primitives/Badge.svelte';
+  import Button from '#lib/components/primitives/Button.svelte';
+  import { formatDateTime, formatDuration, formatRelativeTime } from '#lib/utils/formatting';
 
   let {
     incident,

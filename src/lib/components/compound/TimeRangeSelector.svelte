@@ -1,5 +1,5 @@
 <script lang="ts" module>
-  import type { TimeRangeFilter, TimeRangeValue } from '$lib/types/monitor';
+  import type { TimeRangeFilter, TimeRangeValue } from '#lib/types/monitor';
 
   export interface TimeRangeSelectorProps {
     /** Two-way bound range selection. */
@@ -16,7 +16,7 @@
 </script>
 
 <script lang="ts">
-  import { TIME_RANGE_OPTIONS } from '$lib/utils/formatting';
+  import { TIME_RANGE_OPTIONS } from '#lib/utils/formatting';
 
   let {
     value = $bindable('1h'),

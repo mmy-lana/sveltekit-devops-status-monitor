@@ -25,5 +25,9 @@
     "tailwindcss": "latest",
     "typescript": "^6.0.3",
     "vite": "latest"
+  },
+  "imports": {
+    "#lib": "./src/lib",
+    "#lib/*": "./src/lib/*"
   }
 }

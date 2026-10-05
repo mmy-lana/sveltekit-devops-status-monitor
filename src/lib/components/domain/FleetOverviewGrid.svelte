@@ -1,5 +1,5 @@
 <script lang="ts" module>
-  import type { FleetSummary } from '$lib/types/monitor';
+  import type { FleetSummary } from '#lib/types/monitor';
 
   export interface FleetOverviewGridProps {
     summary: FleetSummary;
@@ -7,7 +7,7 @@
 </script>
 
 <script lang="ts">
-  import StatusSummaryCard from '$lib/components/compound/StatusSummaryCard.svelte';
+  import StatusSummaryCard from '#lib/components/compound/StatusSummaryCard.svelte';
 
   let { summary }: FleetOverviewGridProps = $props();
 

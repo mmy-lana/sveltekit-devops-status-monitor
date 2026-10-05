@@ -1,5 +1,5 @@
 <script lang="ts" module>
-  import type { LogEntry, LogLevel } from '$lib/types/monitor';
+  import type { LogEntry, LogLevel } from '#lib/types/monitor';
 
   export interface LogConsoleProps {
     /** Entries to render, any order. Sorted newest first internally. */
@@ -206,7 +206,7 @@
 </script>
 
 <script lang="ts">
-  import { LOG_LEVEL_ORDER, formatLogTimestamp } from '$lib/utils/formatting';
+  import { LOG_LEVEL_ORDER, formatLogTimestamp } from '#lib/utils/formatting';
 
   let {
     entries,

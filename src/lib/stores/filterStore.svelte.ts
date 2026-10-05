@@ -5,8 +5,8 @@ import type {
   ServerStatus,
   SortDirection,
   SortKey
-} from '$lib/types/monitor';
-import { monitorStore } from '$lib/stores/monitorStore.svelte';
+} from '#lib/types/monitor';
+import { monitorStore } from '#lib/stores/monitorStore.svelte';
 
 /**
  * Query state for the fleet table.

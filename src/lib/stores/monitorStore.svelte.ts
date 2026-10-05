@@ -1,11 +1,11 @@
 import Dexie from 'dexie';
-import { db, pruneExpiredData, seedInitialDataIfEmpty } from '$lib/db';
+import { db, pruneExpiredData, seedInitialDataIfEmpty } from '#lib/db';
 import {
   applyEvaluations,
   evaluateRules,
   incidentFromAlarm,
   isTerminalStatus
-} from '$lib/engine/alarmEvaluator';
+} from '#lib/engine/alarmEvaluator';
 import type {
   AlarmRule,
   AlarmRuleDraft,
@@ -21,10 +21,10 @@ import type {
   ServerAsset,
   ServerAssetDraft,
   ServerStatus
-} from '$lib/types/monitor';
-import { METRIC_UNITS, extractMetricValue } from '$lib/utils/alarmUtils';
-import { ID_PREFIXES, generateEntityId } from '$lib/utils/id';
-import { clamp, summarizeMetricSeries } from '$lib/utils/statistics';
+} from '#lib/types/monitor';
+import { METRIC_UNITS, extractMetricValue } from '#lib/utils/alarmUtils';
+import { ID_PREFIXES, generateEntityId } from '#lib/utils/id';
+import { clamp, summarizeMetricSeries } from '#lib/utils/statistics';
 
 /** Minimum wall-clock gap between retention sweeps, in milliseconds. */
 const PRUNE_INTERVAL_MS = 10 * 60 * 1000;

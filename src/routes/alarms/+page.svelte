@@ -1,10 +1,10 @@
 <script lang="ts">
-  import { monitorStore } from '$lib/stores/monitorStore.svelte';
-  import { filterStore } from '$lib/stores/filterStore.svelte';
-  import AlarmListManager from '$lib/components/domain/AlarmListManager.svelte';
-  import StatusSummaryCard from '$lib/components/compound/StatusSummaryCard.svelte';
-  import RefreshRateDropdown from '$lib/components/compound/RefreshRateDropdown.svelte';
-  import { formatRelativeTime } from '$lib/utils/formatting';
+  import { monitorStore } from '#lib/stores/monitorStore.svelte';
+  import { filterStore } from '#lib/stores/filterStore.svelte';
+  import AlarmListManager from '#lib/components/domain/AlarmListManager.svelte';
+  import StatusSummaryCard from '#lib/components/compound/StatusSummaryCard.svelte';
+  import RefreshRateDropdown from '#lib/components/compound/RefreshRateDropdown.svelte';
+  import { formatRelativeTime } from '#lib/utils/formatting';
 </script>
 
 <div class="flex flex-col gap-4">

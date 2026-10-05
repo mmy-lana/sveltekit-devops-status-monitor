@@ -1,5 +1,5 @@
 <script lang="ts" module>
-  import type { ServerAsset } from '$lib/types/monitor';
+  import type { ServerAsset } from '#lib/types/monitor';
 
   export interface ServerListTableProps {
     /** Rows to render, already filtered and sorted by the caller. */
@@ -13,16 +13,16 @@
 </script>
 
 <script lang="ts">
-  import Badge from '$lib/components/primitives/Badge.svelte';
-  import Button from '$lib/components/primitives/Button.svelte';
-  import Card from '$lib/components/primitives/Card.svelte';
-  import ProgressBar from '$lib/components/primitives/ProgressBar.svelte';
-  import Table, { type TableColumn } from '$lib/components/primitives/Table.svelte';
-  import FilterSearchToolbar from '$lib/components/compound/FilterSearchToolbar.svelte';
-  import RefreshRateDropdown from '$lib/components/compound/RefreshRateDropdown.svelte';
-  import Sparkline from '$lib/components/compound/Sparkline.svelte';
-  import { filterStore } from '$lib/stores/filterStore.svelte';
-  import { monitorStore } from '$lib/stores/monitorStore.svelte';
+  import Badge from '#lib/components/primitives/Badge.svelte';
+  import Button from '#lib/components/primitives/Button.svelte';
+  import Card from '#lib/components/primitives/Card.svelte';
+  import ProgressBar from '#lib/components/primitives/ProgressBar.svelte';
+  import Table, { type TableColumn } from '#lib/components/primitives/Table.svelte';
+  import FilterSearchToolbar from '#lib/components/compound/FilterSearchToolbar.svelte';
+  import RefreshRateDropdown from '#lib/components/compound/RefreshRateDropdown.svelte';
+  import Sparkline from '#lib/components/compound/Sparkline.svelte';
+  import { filterStore } from '#lib/stores/filterStore.svelte';
+  import { monitorStore } from '#lib/stores/monitorStore.svelte';
 
   let { servers, totalCount, loading = false, onedit }: ServerListTableProps = $props();
 

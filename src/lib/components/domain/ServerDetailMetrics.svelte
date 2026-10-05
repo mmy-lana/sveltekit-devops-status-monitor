@@ -1,6 +1,6 @@
 <script lang="ts" module>
-  import type { AlarmRule, MetricSeries, MetricType, TimeRangeValue } from '$lib/types/monitor';
-  import type { ChartThreshold } from '$lib/components/compound/MetricChart.svelte';
+  import type { AlarmRule, MetricSeries, MetricType, TimeRangeValue } from '#lib/types/monitor';
+  import type { ChartThreshold } from '#lib/components/compound/MetricChart.svelte';
 
   export interface ServerDetailMetricsProps {
     /** Display name used in labels and empty copy. */
@@ -29,11 +29,11 @@
 </script>
 
 <script lang="ts">
-  import Card from '$lib/components/primitives/Card.svelte';
-  import MetricChart from '$lib/components/compound/MetricChart.svelte';
-  import TimeRangeSelector from '$lib/components/compound/TimeRangeSelector.svelte';
-  import { METRIC_LABELS, METRIC_ORDER, METRIC_UNITS } from '$lib/utils/alarmUtils';
-  import { formatBytes, formatMetricValue } from '$lib/utils/formatting';
+  import Card from '#lib/components/primitives/Card.svelte';
+  import MetricChart from '#lib/components/compound/MetricChart.svelte';
+  import TimeRangeSelector from '#lib/components/compound/TimeRangeSelector.svelte';
+  import { METRIC_LABELS, METRIC_ORDER, METRIC_UNITS } from '#lib/utils/alarmUtils';
+  import { formatBytes, formatMetricValue } from '#lib/utils/formatting';
 
   let {
     serverName,

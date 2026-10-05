@@ -41,9 +41,9 @@
 </script>
 
 <script lang="ts">
-  import Card from '$lib/components/primitives/Card.svelte';
-  import ProgressBar from '$lib/components/primitives/ProgressBar.svelte';
-  import Tooltip from '$lib/components/primitives/Tooltip.svelte';
+  import Card from '#lib/components/primitives/Card.svelte';
+  import ProgressBar from '#lib/components/primitives/ProgressBar.svelte';
+  import Tooltip from '#lib/components/primitives/Tooltip.svelte';
 
   let {
     label,

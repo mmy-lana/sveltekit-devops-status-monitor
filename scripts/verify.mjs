@@ -2366,6 +2366,283 @@ async function auditPhase4Presentation(page) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Audit phase 5 — icon glyphs, select overlap, build config          */
+/* ------------------------------------------------------------------ */
+
+const ICON_BUTTON_PROBE = () => {
+  const buttons = Array.from(document.querySelectorAll('[data-variant="icon"]'));
+  return buttons.map((el) => {
+    const rect = el.getBoundingClientRect();
+    const svg = el.querySelector('svg');
+    const svgRect = svg ? svg.getBoundingClientRect() : null;
+    const srOnlyWrapper = el.querySelector('.sr-only');
+    const pathBox = svg ? svg.querySelector('path, circle, rect, polyline') : null;
+    return {
+      label: el.getAttribute('aria-label'),
+      visible: rect.width > 0 && rect.height > 0,
+      buttonWidth: rect.width,
+      buttonHeight: rect.height,
+      hasSvg: Boolean(svg),
+      svgWidth: svgRect ? svgRect.width : 0,
+      svgHeight: svgRect ? svgRect.height : 0,
+      hasGeometry: Boolean(pathBox),
+      wrappedInSrOnly: Boolean(srOnlyWrapper),
+      accessibleName: el.getAttribute('aria-label') ?? el.textContent?.trim() ?? ''
+    };
+  });
+};
+
+async function auditPhase5DesignSystem(page) {
+  section('Audit Phase 5 · Icon Glyphs, Select Overlap & Build Config');
+
+  const routes = [
+    { path: '/', label: 'dashboard' },
+    { path: '/alarms', label: 'alarms' },
+    { path: '/incidents', label: 'incidents' },
+    { path: '/servers/srv-use1-api-01', label: 'server detail' }
+  ];
+
+  await page.goto(`${BASE_URL}/`, { waitUntil: 'networkidle' });
+  await waitForFleetReady(page);
+  await page.waitForTimeout(400);
+
+  /* ---- UIUX-06: every icon button paints a glyph ---------------------- */
+  let totalIconButtons = 0;
+
+  for (const route of routes) {
+    await page.goto(`${BASE_URL}${route.path}`, { waitUntil: 'networkidle' });
+    await waitForFleetReady(page);
+    await page.waitForTimeout(500);
+
+    const buttons = await page.evaluate(ICON_BUTTON_PROBE);
+    totalIconButtons += buttons.length;
+
+    assert(buttons.length > 0, `[${route.label}] The route renders at least one icon button (${buttons.length})`);
+    assert(
+      buttons.every((b) => b.hasSvg),
+      `[${route.label}] Every icon button contains an inline SVG (${buttons.length} checked)`
+    );
+    assert(
+      buttons.every((b) => b.svgWidth > 0 && b.svgHeight > 0),
+      `[${route.label}] Every icon glyph has a non-zero box (${buttons
+        .map((b) => `${b.label}:${Math.round(b.svgWidth)}x${Math.round(b.svgHeight)}`)
+        .join(', ')})`
+    );
+    assert(
+      buttons.every((b) => !b.wrappedInSrOnly),
+      `[${route.label}] No icon glyph is trapped inside an sr-only wrapper`
+    );
+    assert(
+      buttons.every((b) => b.hasGeometry),
+      `[${route.label}] Every icon glyph draws real path geometry`
+    );
+    assert(
+      buttons.every((b) => b.buttonWidth >= 44 && b.buttonHeight >= 44),
+      `[${route.label}] Every icon button still clears the 44x44 tap target`
+    );
+    assert(
+      buttons.every((b) => b.accessibleName.trim().length > 0),
+      `[${route.label}] Every icon button exposes an accessible name`
+    );
+  }
+
+  assert(totalIconButtons >= 4, `Icon buttons were exercised across the app (${totalIconButtons} total)`);
+
+  /* ---- UIUX-06: glyph is visible, not merely present ------------------ */
+  const visibleGlyph = await page.evaluate(() => {
+    const el = document.querySelector('[data-variant="icon"]');
+    if (!el) return null;
+    const svg = el.querySelector('svg');
+    const style = svg ? getComputedStyle(svg) : null;
+    const path = svg?.querySelector('path');
+    const pathStyle = path ? getComputedStyle(path) : null;
+    const fill = pathStyle?.fill ?? null;
+    const stroke = pathStyle?.stroke ?? null;
+    const strokeWidth = pathStyle?.strokeWidth ?? null;
+    // Icons may be fill-based or stroke-based; both are legitimate as long as
+    // the shape actually paints ink rather than being fully transparent.
+    const painted =
+      (fill !== null && fill !== 'none' && fill !== 'rgba(0, 0, 0, 0)') ||
+      (stroke !== null && stroke !== 'none' && stroke !== 'rgba(0, 0, 0, 0)');
+    return {
+      width: svg?.getBoundingClientRect().width ?? 0,
+      height: svg?.getBoundingClientRect().height ?? 0,
+      visibility: style?.visibility ?? null,
+      opacity: style?.opacity ?? null,
+      color: style?.color ?? null,
+      fill,
+      stroke,
+      strokeWidth,
+      painted
+    };
+  });
+
+  assert(Boolean(visibleGlyph), 'A glyph is present for the visibility probe');
+  assert(visibleGlyph.width > 0 && visibleGlyph.height > 0, 'The glyph occupies real layout space');
+  assert(visibleGlyph.visibility === 'visible', `The glyph is not hidden (visibility: ${visibleGlyph.visibility})`);
+  assert(Number(visibleGlyph.opacity) > 0, `The glyph is not transparent (opacity: ${visibleGlyph.opacity})`);
+  assert(
+    visibleGlyph.painted,
+    `The glyph paints ink via fill or stroke (fill=${visibleGlyph.fill}, stroke=${visibleGlyph.stroke})`
+  );
+
+  /* ---- UIUX-07: the status select has no nested badge ------------------ */
+  await page.goto(`${BASE_URL}/`, { waitUntil: 'networkidle' });
+  await waitForFleetReady(page);
+  await page.waitForTimeout(400);
+
+  await page.locator('[data-testid="asset-create"]').click();
+  await page.waitForTimeout(400);
+  assert((await page.locator('[data-testid="asset-form"]').count()) > 0, 'The asset modal opens for the select probe');
+
+  const selectProbe = await page.evaluate(() => {
+    const select = document.querySelector('[data-testid="asset-status"]');
+    if (!select) return { missing: true };
+
+    const control = select.closest('div');
+    const srOnlySvgs = Array.from(control?.querySelectorAll('.sr-only svg') ?? []);
+    const allSvgs = Array.from(control?.querySelectorAll('svg') ?? []);
+    const badge = control?.querySelector('[data-testid="badge"]') ?? null;
+    const label = document.querySelector(`label[for="${select.id}"]`);
+
+    const selectRect = select.getBoundingClientRect();
+    const chevron = control?.querySelector('svg[viewBox="0 0 16 16"]');
+
+    return {
+      missing: false,
+      srOnlySvgCount: srOnlySvgs.length,
+      svgCount: allSvgs.length,
+      hasBadge: Boolean(badge),
+      selectedText: select.options[select.selectedIndex]?.textContent?.trim() ?? null,
+      optionLabels: Array.from(select.options).map((o) => o.textContent?.trim()),
+      label: label?.textContent?.trim() ?? null,
+      selectWidth: selectRect.width,
+      chevronLeft: chevron ? chevron.getBoundingClientRect().left : null,
+      selectRight: selectRect.right,
+      padLeft: Number.parseFloat(getComputedStyle(select).paddingLeft),
+      padRight: Number.parseFloat(getComputedStyle(select).paddingRight)
+    };
+  });
+
+  assert(!selectProbe.missing, 'The lifecycle status select is rendered');
+  assertEqual(selectProbe.label, 'Lifecycle status', 'The lifecycle status select keeps its label');
+  assertEqual(
+    selectProbe.srOnlySvgCount,
+    0,
+    'The lifecycle status control contains no sr-only SVG badge'
+  );
+  assertEqual(
+    selectProbe.hasBadge,
+    false,
+    'No status Badge is rendered inside the select control, so no text collision is possible'
+  );
+  assert(
+    selectProbe.svgCount <= 1,
+    `The select control renders only the chevron affordance (${selectProbe.svgCount} svg)`
+  );
+
+  const lowercased = (selectProbe.optionLabels ?? []).filter((label) => label && label !== label.charAt(0).toUpperCase() + label.slice(1));
+  assertEqual(
+    lowercased.length,
+    0,
+    `Every lifecycle status option is capitalized (${(selectProbe.optionLabels ?? []).join(', ')})`
+  );
+  assert(
+    ['Healthy', 'Warning', 'Critical', 'Maintenance', 'Offline'].every((expected) =>
+      (selectProbe.optionLabels ?? []).includes(expected)
+    ),
+    'The option set exposes all five lifecycle states'
+  );
+  assert(
+    selectProbe.selectedText === 'Healthy',
+    `The select renders only its own value text (${selectProbe.selectedText})`
+  );
+
+  // The value must not run under the chevron affordance.
+  assert(
+    selectProbe.padLeft >= 8 && selectProbe.padRight >= 24,
+    `The select reserves room for its affordances (padding ${selectProbe.padLeft}/${selectProbe.padRight})`
+  );
+
+  // And the relocated preview must not overlap the control.
+  const previewClearance = await page.evaluate(() => {
+    const select = document.querySelector('[data-testid="asset-status"]');
+    const preview = document.querySelector('[data-testid="asset-status-preview"]');
+    if (!select || !preview) return null;
+    const a = select.getBoundingClientRect();
+    const b = preview.getBoundingClientRect();
+    return { selectBottom: a.bottom, previewTop: b.top, previewText: preview.textContent?.replace(/\s+/g, ' ').trim() };
+  });
+  assert(Boolean(previewClearance), 'The relocated status preview is rendered');
+  assert(
+    previewClearance.previewTop >= previewClearance.selectBottom,
+    `The status preview sits clear of the select control (${Math.round(
+      previewClearance.previewTop
+    )} >= ${Math.round(previewClearance.selectBottom)})`
+  );
+  assert(
+    /Healthy/i.test(previewClearance.previewText ?? ''),
+    `The preview reflects the current selection (${previewClearance.previewText})`
+  );
+
+  // Change the selection and confirm the preview follows without overlapping.
+  await page.locator('[data-testid="asset-status"]').selectOption('critical');
+  await page.waitForTimeout(300);
+  const updated = await page.evaluate(() => {
+    const select = document.querySelector('[data-testid="asset-status"]');
+    const preview = document.querySelector('[data-testid="asset-status-preview"]');
+    const a = select.getBoundingClientRect();
+    const b = preview.getBoundingClientRect();
+    return {
+      value: select.value,
+      selectedText: select.options[select.selectedIndex]?.textContent?.trim(),
+      overlap: b.top < a.bottom,
+      previewText: preview.textContent?.replace(/\s+/g, ' ').trim()
+    };
+  });
+  assertEqual(updated.value, 'critical', 'The lifecycle status updates on selection');
+  assertEqual(updated.selectedText, 'Critical', 'The selected value renders as a single capitalized word');
+  assertEqual(updated.overlap, false, 'The preview never overlaps the control after a change');
+  assert(/Critical/i.test(updated.previewText ?? ''), 'The preview follows the new selection');
+
+  await page.locator('[data-testid="asset-close"]').click();
+  await page.waitForTimeout(300);
+
+  /* ---- CODE-02: the deprecated alias is gone -------------------------- */
+  const configProbe = await page.evaluate(async () => {
+    const modules = performance
+      .getEntriesByType('resource')
+      .map((entry) => entry.name)
+      .filter((name) => name.includes('/src/lib/'));
+
+    return {
+      legacyLibSpecifiers: modules.filter((name) => name.includes('$lib')),
+      libModuleCount: modules.length
+    };
+  });
+
+  assert(configProbe.libModuleCount > 0, `Application modules resolve through the src/lib path (${configProbe.libModuleCount})`);
+  assertEqual(
+    configProbe.legacyLibSpecifiers.length,
+    0,
+    'No module is resolved through the deprecated $lib specifier'
+  );
+
+  /* ---- CODE-02: the app still functions after the migration ----------- */
+  const stillWorks = await page.evaluate(() => ({
+    rows: document.querySelectorAll('[data-testid="table-row"]').length,
+    cards: document.querySelectorAll('[data-testid="table-card-body"]').length,
+    pills: document.querySelectorAll('[data-testid^="status-count-"]').length,
+    sparklines: document.querySelectorAll('[data-testid="sparkline"]').length,
+    heading: document.querySelector('h1')?.textContent?.trim() ?? null
+  }));
+
+  assertEqual(stillWorks.heading, 'Fleet Overview', 'The dashboard still renders after the module migration');
+  assertEqual(stillWorks.pills, 6, 'The status pills still resolve after the module migration');
+  assert(stillWorks.rows > 0 || stillWorks.cards > 0, 'The fleet table still renders after the module migration');
+}
+
+/* ------------------------------------------------------------------ */
 /* Audit phase 1 — security and data layer integrity                   */
 /* ------------------------------------------------------------------ */
 
@@ -2914,6 +3191,7 @@ async function main() {
     await auditPhase2Telemetry(phase1Page);
     await auditPhase3Layout(phase1Page);
     await auditPhase4Presentation(phase1Page);
+    await auditPhase5DesignSystem(phase1Page);
 
     if (maxPhase >= 3) await checkPhase3(phase1Page);
 

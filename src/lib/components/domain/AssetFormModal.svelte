@@ -6,7 +6,7 @@
     ServerAssetDraft,
     ServerStatus,
     ValidationErrors
-  } from '$lib/types/monitor';
+  } from '#lib/types/monitor';
 
   export interface AssetFormModalProps {
     /** Controls visibility. */
@@ -176,11 +176,11 @@
 </script>
 
 <script lang="ts">
-  import Badge from '$lib/components/primitives/Badge.svelte';
-  import Button from '$lib/components/primitives/Button.svelte';
-  import Input from '$lib/components/primitives/Input.svelte';
-  import Select from '$lib/components/primitives/Select.svelte';
-  import { slugifyAssetName } from '$lib/utils/id';
+  import Badge from '#lib/components/primitives/Badge.svelte';
+  import Button from '#lib/components/primitives/Button.svelte';
+  import Input from '#lib/components/primitives/Input.svelte';
+  import Select from '#lib/components/primitives/Select.svelte';
+  import { slugifyAssetName } from '#lib/utils/id';
 
   let {
     open,
@@ -441,18 +441,30 @@
           </div>
 
           <div class="grid gap-3 sm:grid-cols-2">
-            <Select
-              label="Lifecycle status"
-              name="asset-status"
-              testId="asset-status"
-              options={STATUS_OPTIONS.map((value) => ({ value, label: value }))}
-              value={draft.status}
-              onchange={(event) => field('status', event.currentTarget.value as ServerStatus)}
-            >
-              {#snippet icon()}
+            <!--
+              No leading adornment here: a status Badge rendered inside the
+              select icon slot overlapped the selected value and read as
+              "HEALhealthy". The selected status is rendered by the control
+              itself, and the live preview lives directly below the field.
+            -->
+            <div class="flex flex-col gap-1.5">
+              <Select
+                label="Lifecycle status"
+                name="asset-status"
+                testId="asset-status"
+                options={STATUS_OPTIONS.map((value) => ({
+                  value,
+                  label: value.charAt(0).toUpperCase() + value.slice(1)
+                }))}
+                value={draft.status}
+                onchange={(event) => field('status', event.currentTarget.value as ServerStatus)}
+              />
+              <!-- Live preview sits below the control, clear of the rendered value. -->
+              <p class="flex items-center gap-1.5 text-[11px] text-cw-faint" data-testid="asset-status-preview">
+                Selected
                 <Badge variant="status" size="sm" value={draft.status} />
-              {/snippet}
-            </Select>
+              </p>
+            </div>
             <Input
               label="Owner"
               name="asset-owner"

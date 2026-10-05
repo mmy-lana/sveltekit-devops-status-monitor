@@ -1,12 +1,12 @@
 <script lang="ts">
   import { goto } from '$app/navigation';
-  import AssetFormModal from '$lib/components/domain/AssetFormModal.svelte';
-  import FleetOverviewGrid from '$lib/components/domain/FleetOverviewGrid.svelte';
-  import ServerListTable from '$lib/components/domain/ServerListTable.svelte';
-  import Button from '$lib/components/primitives/Button.svelte';
-  import { filterStore } from '$lib/stores/filterStore.svelte';
-  import { monitorStore } from '$lib/stores/monitorStore.svelte';
-  import type { ServerAsset } from '$lib/types/monitor';
+  import AssetFormModal from '#lib/components/domain/AssetFormModal.svelte';
+  import FleetOverviewGrid from '#lib/components/domain/FleetOverviewGrid.svelte';
+  import ServerListTable from '#lib/components/domain/ServerListTable.svelte';
+  import Button from '#lib/components/primitives/Button.svelte';
+  import { filterStore } from '#lib/stores/filterStore.svelte';
+  import { monitorStore } from '#lib/stores/monitorStore.svelte';
+  import type { ServerAsset } from '#lib/types/monitor';
 
   const summary = $derived(monitorStore.fleetSummary);
   const filteredServers = $derived(

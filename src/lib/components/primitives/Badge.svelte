@@ -1,5 +1,5 @@
 <script lang="ts" module>
-  import type { AlarmState, IncidentSeverity, ServerStatus } from '$lib/types/monitor';
+  import type { AlarmState, IncidentSeverity, ServerStatus } from '#lib/types/monitor';
 
   /** Supported badge vocabularies. */
   export type BadgeVariant = 'status' | 'severity' | 'alarm' | 'log' | 'environment' | 'neutral';

@@ -5,15 +5,15 @@ import type {
   IncidentStatus,
   MetricDataPoint,
   ServerAsset
-} from '$lib/types/monitor';
+} from '#lib/types/monitor';
 import {
   deriveIncidentSeverity,
   evaluateThreshold,
   extractMetricValue,
   METRIC_LABELS,
   METRIC_UNITS
-} from '$lib/utils/alarmUtils';
-import { ID_PREFIXES, generateEntityId } from '$lib/utils/id';
+} from '#lib/utils/alarmUtils';
+import { ID_PREFIXES, generateEntityId } from '#lib/utils/id';
 
 /**
  * Pure alarm evaluation engine.

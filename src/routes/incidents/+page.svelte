@@ -1,14 +1,14 @@
 <script lang="ts">
-  import { monitorStore } from '$lib/stores/monitorStore.svelte';
-  import { meanTimeToResolve, isTerminalStatus } from '$lib/engine/alarmEvaluator';
-  import Badge from '$lib/components/primitives/Badge.svelte';
-  import Card from '$lib/components/primitives/Card.svelte';
-  import Table, { type TableColumn } from '$lib/components/primitives/Table.svelte';
-  import IncidentTimelineDrawer from '$lib/components/domain/IncidentTimelineDrawer.svelte';
-  import StatusSummaryCard from '$lib/components/compound/StatusSummaryCard.svelte';
-  import Input from '$lib/components/primitives/Input.svelte';
-  import { formatDateTime, formatDuration, formatRelativeTime } from '$lib/utils/formatting';
-  import type { Incident, IncidentStatus } from '$lib/types/monitor';
+  import { monitorStore } from '#lib/stores/monitorStore.svelte';
+  import { meanTimeToResolve, isTerminalStatus } from '#lib/engine/alarmEvaluator';
+  import Badge from '#lib/components/primitives/Badge.svelte';
+  import Card from '#lib/components/primitives/Card.svelte';
+  import Table, { type TableColumn } from '#lib/components/primitives/Table.svelte';
+  import IncidentTimelineDrawer from '#lib/components/domain/IncidentTimelineDrawer.svelte';
+  import StatusSummaryCard from '#lib/components/compound/StatusSummaryCard.svelte';
+  import Input from '#lib/components/primitives/Input.svelte';
+  import { formatDateTime, formatDuration, formatRelativeTime } from '#lib/utils/formatting';
+  import type { Incident, IncidentStatus } from '#lib/types/monitor';
 
   type IncidentFilter = IncidentStatus | 'all';
 

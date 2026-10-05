@@ -131,7 +131,20 @@
     <span class="inline-flex shrink-0 items-center" aria-hidden="true">{@render icon()}</span>
   {/if}
   {#if children}
-    <span class={variant === 'icon' ? 'sr-only' : 'truncate'}>{@render children()}</span>
+    <!--
+      An icon button carries its glyph as `children`, not through the `icon`
+      slot. Wrapping those children in `sr-only` collapsed them to a 1px box,
+      which left every icon button in the console rendering as an empty square.
+      Icon buttons therefore render children visibly and rely on the caller's
+      `ariaLabel` for the accessible name.
+    -->
+    {#if variant === 'icon'}
+      <span class="inline-flex shrink-0 items-center justify-center" aria-hidden="true">
+        {@render children()}
+      </span>
+    {:else}
+      <span class="truncate">{@render children()}</span>
+    {/if}
   {/if}
   {#if trailing && !loading}
     <span class="inline-flex shrink-0 items-center" aria-hidden="true">{@render trailing()}</span>

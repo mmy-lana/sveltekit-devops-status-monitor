@@ -1,5 +1,5 @@
 <script lang="ts" module>
-  import type { ServerAsset, ServerStatus, SortDirection, SortKey } from '$lib/types/monitor';
+  import type { ServerAsset, ServerStatus, SortDirection, SortKey } from '#lib/types/monitor';
 
   export interface FilterSearchToolbarProps {
     /** Two-way bound free-text query. */
@@ -63,10 +63,10 @@
 </script>
 
 <script lang="ts">
-  import Badge from '$lib/components/primitives/Badge.svelte';
-  import Button from '$lib/components/primitives/Button.svelte';
-  import Input from '$lib/components/primitives/Input.svelte';
-  import Select from '$lib/components/primitives/Select.svelte';
+  import Badge from '#lib/components/primitives/Badge.svelte';
+  import Button from '#lib/components/primitives/Button.svelte';
+  import Input from '#lib/components/primitives/Input.svelte';
+  import Select from '#lib/components/primitives/Select.svelte';
 
   let {
     searchQuery = $bindable(''),

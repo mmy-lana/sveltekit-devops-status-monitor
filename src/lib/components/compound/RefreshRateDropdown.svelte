@@ -1,5 +1,5 @@
 <script lang="ts" module>
-  import type { RefreshRateMs } from '$lib/types/monitor';
+  import type { RefreshRateMs } from '#lib/types/monitor';
 
   export interface RefreshRateOption {
     value: RefreshRateMs;
@@ -29,7 +29,7 @@
 </script>
 
 <script lang="ts">
-  import Select from '$lib/components/primitives/Select.svelte';
+  import Select from '#lib/components/primitives/Select.svelte';
 
   let {
     value = $bindable<RefreshRateMs>(15000),

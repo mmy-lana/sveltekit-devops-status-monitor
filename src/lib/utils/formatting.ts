@@ -1,4 +1,4 @@
-import type { LogLevel, MetricUnit, TimeRangeFilter, TimeRangeValue } from '$lib/types/monitor';
+import type { LogLevel, MetricUnit, TimeRangeFilter, TimeRangeValue } from '#lib/types/monitor';
 
 /* ------------------------------------------------------------------ */
 /* Bandwidth & storage                                                 */

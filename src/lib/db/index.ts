@@ -6,9 +6,9 @@ import type {
   MetricDataPoint,
   ServerAsset,
   ServerTelemetryRecord
-} from '$lib/types/monitor';
-import { ID_PREFIXES } from '$lib/utils/id';
-import { RETENTION_MS } from '$lib/utils/formatting';
+} from '#lib/types/monitor';
+import { ID_PREFIXES } from '#lib/utils/id';
+import { RETENTION_MS } from '#lib/utils/formatting';
 
 /**
  * Offline-first persistence layer.
