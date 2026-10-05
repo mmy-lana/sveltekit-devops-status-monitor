@@ -89,10 +89,18 @@
     SORT_OPTIONS.map((option) => ({ value: option.value, label: option.label }))
   );
 
+  /**
+   * Per-status result counts for the pill strip.
+   *
+   * STATUS_FILTERS itself contains the 'all' sentinel, so zero-filling from that
+   * list would overwrite the fleet total. The sentinel is therefore assigned
+   * after every per-status counter has been tallied.
+   */
   const statusCounts = $derived.by(() => {
-    const counts = new Map<StatusFilterValue, number>([['all', servers.length]]);
+    const counts = new Map<StatusFilterValue, number>();
     for (const filter of STATUS_FILTERS) counts.set(filter.value, 0);
     for (const server of servers) counts.set(server.status, (counts.get(server.status) ?? 0) + 1);
+    counts.set('all', servers.length);
     return counts;
   });
 
@@ -116,11 +124,16 @@
 
 <div
   data-testid="filter-toolbar"
-  class="flex flex-col gap-2.5 xl:flex-row xl:items-end xl:gap-3"
+  class="flex flex-col gap-3"
 >
   <!-- Row 1: search + region + sort -->
-  <div class="flex min-w-0 flex-col gap-2.5 sm:flex-row xl:flex-1">
-    <div class="min-w-0 flex-1">
+  <!--
+    Row 1 wraps rather than squeezing: every control here is shrink-0 or has a
+    200px floor, so at tablet widths the refresh dropdown has to drop to its own
+    line instead of pushing past the viewport edge.
+  -->
+  <div class="flex min-w-0 flex-col gap-3 sm:flex-row sm:flex-wrap">
+    <div class="min-w-[200px] flex-1">
       <Input
         label="Search instances"
         name="server-search"
@@ -145,11 +158,11 @@
       </Input>
     </div>
 
-    <div class="sm:w-48">
+    <div class="w-full shrink-0 sm:w-48">
       <Select label="Region" name="region-filter" testId="region-filter" options={regionOptions} bind:value={region} />
     </div>
 
-    <div class="sm:w-48">
+    <div class="w-full shrink-0 sm:w-48">
       <Select
         label="Sort by"
         name="sort-by"

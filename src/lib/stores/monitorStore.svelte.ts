@@ -389,6 +389,29 @@ class MonitorState {
         if (batch.evaluations.length > 0) alarms = applyEvaluations(alarms, batch.evaluations);
 
         for (const evaluation of batch.triggered) {
+          /*
+           * Idempotency guard.
+           *
+           * A rule latches into ALARM, but a manual acknowledgement resets it to
+           * OK while the metric is still breaching, so the very next collector
+           * tick re-latches it and would open a second incident for the same
+           * underlying condition. Check both the committed incidents and the ones
+           * already staged in this cycle, so one cycle cannot double-open either.
+           */
+          const alreadyOpen =
+            this.incidents.some(
+              (incident) =>
+                incident.alarmRuleId === evaluation.rule.id &&
+                incident.serverId === server.id &&
+                incident.status !== 'resolved'
+            ) ||
+            openedIncidents.some(
+              (incident) =>
+                incident.alarmRuleId === evaluation.rule.id && incident.serverId === server.id
+            );
+
+          if (alreadyOpen) continue;
+
           openedIncidents.push(
             incidentFromAlarm(evaluation.rule, server, server.id, evaluation.breachedValue, now)
           );

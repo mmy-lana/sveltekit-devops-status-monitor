@@ -26,12 +26,22 @@
 
   let { servers, totalCount, loading = false, onedit }: ServerListTableProps = $props();
 
+  /**
+   * Hosts that are drained or powered down are excluded from the collector loop,
+   * so any reading shown for them is a stale leftover. Presenting a frozen bar
+   * next to a live "healthy" readout invites a false conclusion, so these cells
+   * render an explicit no-data marker instead.
+   */
+  function isReporting(server: ServerAsset): boolean {
+    return server.status !== 'offline' && server.status !== 'maintenance';
+  }
+
   const columns: TableColumn[] = [
     { key: 'name', label: 'Instance', primary: true },
     { key: 'region', label: 'Region / AZ' },
     { key: 'environment', label: 'Env' },
     { key: 'status', label: 'Status' },
-    { key: 'trend', label: '1h trend' },
+    { key: 'trend', label: '1h CPU Trend' },
     { key: 'cpu', label: 'CPU', align: 'right', class: 'min-w-[150px]' },
     { key: 'memory', label: 'Memory', align: 'right', class: 'min-w-[150px]' },
     { key: 'latency', label: 'Latency', align: 'right' }
@@ -123,46 +133,114 @@
           />
         </span>
       {:else if column.key === 'trend'}
-        <div class="flex min-w-0 justify-center @min-[48rem]:justify-start">
-          <Sparkline
-            values={monitorStore.sparklineFor(server.id)}
-            width={80}
-            height={24}
-            toneByValue
-            label={`CPU trend for ${server.name}`}
-          />
+        <div class="flex min-w-0 items-center justify-center gap-2 @min-[48rem]:justify-start">
+          {#if isReporting(server)}
+            <Sparkline
+              values={monitorStore.sparklineFor(server.id)}
+              width={80}
+              height={24}
+              toneByValue
+              label={`CPU trend for ${server.name}`}
+            />
+          {:else}
+            <svg
+              viewBox="0 0 80 24"
+              width="80"
+              height="24"
+              aria-hidden="true"
+              data-testid="sparkline-absent"
+            >
+              <line
+                x1="0"
+                x2="80"
+                y1="12"
+                y2="12"
+                stroke="#334155"
+                stroke-width="1"
+                stroke-dasharray="3 3"
+                vector-effect="non-scaling-stroke"
+              />
+            </svg>
+            <span class="font-mono text-[11px] text-cw-faint" data-testid="trend-absent">n/a</span>
+          {/if}
         </div>
       {:else if column.key === 'cpu'}
         {@const cpu = monitorStore.activeTelemetry[server.id]?.cpuUsage ?? 0}
-        <div class="flex min-w-[120px] items-center justify-end gap-2">
-          <ProgressBar value={cpu} size="sm" hideLabel label={`CPU utilization for ${server.name}`} />
-          <span
-            data-testid="cpu-value"
-            class="tnum w-[52px] shrink-0 text-right font-mono text-[11px] text-cw-text"
+        {#if isReporting(server)}
+          <div class="flex min-w-[120px] items-center justify-end gap-2">
+            <ProgressBar value={cpu} size="sm" hideLabel label={`CPU utilization for ${server.name}`} />
+            <span
+              data-testid="cpu-value"
+              class="tnum w-[52px] shrink-0 text-right font-mono text-[11px] text-cw-text"
+            >
+              {cpu.toFixed(1)}%
+            </span>
+          </div>
+        {:else}
+          <div
+            class="flex min-w-[120px] items-center justify-end gap-2"
+            data-testid="cpu-inactive"
+            aria-label={`CPU utilization is not reported for ${server.name}`}
           >
-            {cpu.toFixed(1)}%
-          </span>
-        </div>
+            <span
+              class="h-1.5 flex-1 rounded-full bg-slate-border/70 ring-1 ring-inset ring-slate-border/40 ring-dashed"
+              aria-hidden="true"
+            ></span>
+            <span
+              data-testid="cpu-value"
+              class="tnum w-[52px] shrink-0 text-right font-mono text-[11px] text-cw-faint"
+              >--</span
+            >
+          </div>
+        {/if}
       {:else if column.key === 'memory'}
         {@const memory = monitorStore.activeTelemetry[server.id]?.memoryUsage ?? 0}
-        <div class="flex min-w-[120px] items-center justify-end gap-2">
-          <ProgressBar
-            value={memory}
-            size="sm"
-            hideLabel
-            warningThreshold={80}
-            criticalThreshold={92}
-            label={`Memory utilization for ${server.name}`}
-          />
-          <span class="tnum w-[52px] shrink-0 text-right font-mono text-[11px] text-cw-text">
-            {memory.toFixed(1)}%
-          </span>
-        </div>
+        {#if isReporting(server)}
+          <div class="flex min-w-[120px] items-center justify-end gap-2">
+            <ProgressBar
+              value={memory}
+              size="sm"
+              hideLabel
+              warningThreshold={80}
+              criticalThreshold={92}
+              label={`Memory utilization for ${server.name}`}
+            />
+            <span
+              data-testid="memory-value"
+              class="tnum w-[52px] shrink-0 text-right font-mono text-[11px] text-cw-text"
+            >
+              {memory.toFixed(1)}%
+            </span>
+          </div>
+        {:else}
+          <div
+            class="flex min-w-[120px] items-center justify-end gap-2"
+            data-testid="memory-inactive"
+            aria-label={`Memory utilization is not reported for ${server.name}`}
+          >
+            <span
+              class="h-1.5 flex-1 rounded-full bg-slate-border/70 ring-1 ring-inset ring-slate-border/40 ring-dashed"
+              aria-hidden="true"
+            ></span>
+            <span
+              data-testid="memory-value"
+              class="tnum w-[52px] shrink-0 text-right font-mono text-[11px] text-cw-faint"
+              >--</span
+            >
+          </div>
+        {/if}
       {:else if column.key === 'latency'}
         {@const latency = monitorStore.activeTelemetry[server.id]?.latencyMs ?? 0}
-        <span class="tnum font-mono text-[11px] {latency > 250 ? 'text-cw-rose' : 'text-cw-text'}">
-          {latency.toFixed(1)} ms
-        </span>
+        {#if isReporting(server)}
+          <span
+            data-testid="latency-value"
+            class="tnum font-mono text-[11px] {latency > 250 ? 'text-cw-rose' : 'text-cw-text'}"
+          >
+            {latency.toFixed(1)} ms
+          </span>
+        {:else}
+          <span data-testid="latency-inactive" class="font-mono text-[11px] text-cw-faint">--</span>
+        {/if}
       {/if}
     {/snippet}
   </Table>

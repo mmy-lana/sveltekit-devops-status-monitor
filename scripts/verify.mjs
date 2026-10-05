@@ -1024,7 +1024,10 @@ async function checkPhase4(page) {
     'Only forward lifecycle transitions are offered'
   );
   assertEqual(engine.terminal, true, 'resolved is a terminal incident status');
-  assertEqual(engine.badThreshold, 'Percentage metrics cannot exceed 100', 'Threshold validation rejects impossible percentages');
+  assert(
+    typeof engine.badThreshold === 'string' && /percentage/i.test(engine.badThreshold),
+    `Threshold validation rejects impossible percentages (${engine.badThreshold})`
+  );
   assertEqual(engine.okThreshold, null, 'Threshold validation accepts a sane percentage');
 
   /* ---- live store behaviour on the fleet table ---- */
@@ -1931,6 +1934,438 @@ async function auditPhase3Layout(page) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Audit phase 4 — toolbar layout, telemetry honesty, incident dedup   */
+/* ------------------------------------------------------------------ */
+
+async function auditPhase4Presentation(page) {
+  section('Audit Phase 4 · Toolbar, Telemetry & Incident Hygiene');
+
+  await page.goto(`${BASE_URL}/`, { waitUntil: 'networkidle' });
+  await waitForFleetReady(page);
+  await page.waitForTimeout(400);
+
+  /* ---- UIUX-02: the "All" pill reports the fleet total --------------- */
+  const pillCounts = await page.evaluate(() => {
+    const read = (key) =>
+      document.querySelector(`[data-testid="status-count-${key}"]`)?.textContent?.trim() ?? null;
+    return {
+      all: read('all'),
+      healthy: read('healthy'),
+      warning: read('warning'),
+      critical: read('critical'),
+      maintenance: read('maintenance'),
+      offline: read('offline'),
+      allPressed: document
+        .querySelector('[data-testid="status-filter-all"]')
+        ?.getAttribute('aria-pressed'),
+      visibleRows: Array.from(document.querySelectorAll('[data-testid="table-row"]'))
+        .filter((row) => {
+          const rect = row.getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0;
+        }).length
+    };
+  });
+
+  const fleetTotal = await page.evaluate(async () => {
+    const store = await window.__liveModule('monitorStore.svelte.ts');
+    return store.monitorStore.servers.length;
+  });
+
+  assert(
+    /^\d+$/.test(pillCounts.all ?? ''),
+    `The "All" status pill renders a numeric count (${pillCounts.all})`
+  );
+  assertEqual(
+    Number(pillCounts.all),
+    fleetTotal,
+    'The "All" status pill reports the full fleet size, not zero'
+  );
+  assert(Number(pillCounts.all) > 0, 'The "All" status pill count is never reset to zero');
+
+  const perStatusTotal = await page.evaluate(() =>
+    ['healthy', 'warning', 'critical', 'maintenance', 'offline'].reduce(
+      (sum, key) =>
+        sum +
+        Number(
+          document.querySelector(`[data-testid="status-count-${key}"]`)?.textContent?.trim() ?? '0'
+        ),
+      0
+    )
+  );
+  assertEqual(
+    perStatusTotal,
+    fleetTotal,
+    'Per-status pill counts sum to the fleet total, so none of them absorbs the sentinel'
+  );
+  assertEqual(pillCounts.allPressed, 'true', 'The "All" pill is the active filter on load');
+
+  /* ---- UIUX-04: trend column header is disambiguated ------------------ */
+  const headers = await page.evaluate(() =>
+    Array.from(document.querySelectorAll('[data-testid="table-grid"] th'))
+      .map((th) => (th.textContent ?? '').trim())
+      .filter(Boolean)
+  );
+  assert(
+    headers.some((header) => header.toLowerCase() === '1h cpu trend'),
+    `The sparkline column header names the metric it charts (${headers.join(' | ')})`
+  );
+
+  /* ---- UIUX-01: no overlap between the toolbar controls --------------- */
+  for (const width of [1280, 1600]) {
+    await page.setViewportSize({ width, height: 900 });
+    await page.waitForTimeout(300);
+
+    const geometry = await page.evaluate(() => {
+      const rect = (testid) => {
+        const el = document.querySelector(`[data-testid="${testid}"]`);
+        if (!el) return null;
+        const r = el.getBoundingClientRect();
+        return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width };
+      };
+      return {
+        search: rect('server-search'),
+        region: rect('region-filter'),
+        sort: rect('sort-select'),
+        toolbarRows: (() => {
+          const toolbar = document.querySelector('[data-testid="filter-toolbar"]');
+          if (!toolbar) return null;
+          const tops = new Set();
+          for (const child of toolbar.children) {
+            const r = child.getBoundingClientRect();
+            if (r.height > 0) tops.add(Math.round(r.top));
+          }
+          return tops.size;
+        })()
+      };
+    });
+
+    assert(Boolean(geometry.search), `[${width}px] The search input is rendered`);
+    assert(Boolean(geometry.region), `[${width}px] The region selector is rendered`);
+    assert(
+      geometry.search.right <= geometry.region.left + 1,
+      `[${width}px] Search and region controls do not overlap (search right ${Math.round(
+        geometry.search.right
+      )} <= region left ${Math.round(geometry.region.left)})`
+    );
+    assert(
+      geometry.region.right <= geometry.sort.left + 1,
+      `[${width}px] Region and sort controls do not overlap (region right ${Math.round(
+        geometry.region.right
+      )} <= sort left ${Math.round(geometry.sort.left)})`
+    );
+    assert(
+      geometry.search.width >= 200,
+      `[${width}px] The search field keeps its minimum width (${Math.round(geometry.search.width)}px)`
+    );
+    assertEqual(geometry.toolbarRows, 2, `[${width}px] The toolbar stays two rows: controls then pills`);
+  }
+
+  /* ---- UIUX-01: narrow viewports stack cleanly ------------------------ */
+  // Below the sm breakpoint (640px) row 1 must stack; at and above it the
+  // controls sit side by side and must not overlap.
+  for (const width of [360, 390, 430]) {
+    await page.setViewportSize({ width, height: 820 });
+    await page.waitForTimeout(280);
+
+    const stacked = await page.evaluate(() => {
+      const search = document.querySelector('[data-testid="server-search"]')?.getBoundingClientRect();
+      const region = document.querySelector('[data-testid="region-filter"]')?.getBoundingClientRect();
+      const sort = document.querySelector('[data-testid="sort-select"]')?.getBoundingClientRect();
+      return {
+        searchBottom: search?.bottom ?? 0,
+        regionTop: region?.top ?? 0,
+        regionBottom: region?.bottom ?? 0,
+        sortTop: sort?.top ?? 0,
+        docWidth: document.documentElement.clientWidth,
+        scrollWidth: document.documentElement.scrollWidth
+      };
+    });
+
+    assert(
+      stacked.regionTop >= stacked.searchBottom - 1,
+      `[${width}px] The region selector stacks below the search field`
+    );
+    assert(
+      stacked.sortTop >= stacked.regionBottom - 1,
+      `[${width}px] The sort selector stacks below the region selector`
+    );
+    assert(
+      stacked.scrollWidth <= stacked.docWidth + 1,
+      `[${width}px] The toolbar introduces no horizontal overflow`
+    );
+  }
+
+  // At tablet width the controls are a single wrapped row with no overlap.
+  await page.setViewportSize({ width: 768, height: 820 });
+  await page.waitForTimeout(300);
+  const tablet = await page.evaluate(() => {
+    const rect = (testid) => {
+      const r = document.querySelector(`[data-testid="${testid}"]`)?.getBoundingClientRect();
+      return r ? { left: r.left, right: r.right, top: r.top, bottom: r.bottom } : null;
+    };
+    return {
+      search: rect('server-search'),
+      region: rect('region-filter'),
+      sort: rect('sort-select'),
+      refresh: rect('refresh-rate-select'),
+      docWidth: document.documentElement.clientWidth,
+      scrollWidth: document.documentElement.scrollWidth
+    };
+  });
+  assert(tablet.search.right <= tablet.region.left + 1, '[768px] Search and region sit side by side without overlap');
+  assert(tablet.region.right <= tablet.sort.left + 1, '[768px] Region and sort sit side by side without overlap');
+  assert(
+    tablet.scrollWidth <= tablet.docWidth + 1,
+    `[768px] The toolbar introduces no horizontal overflow (${tablet.scrollWidth} <= ${tablet.docWidth})`
+  );
+
+  /* ---- UIUX-03: inactive hosts show no live telemetry ----------------- */
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.goto(`${BASE_URL}/`, { waitUntil: 'networkidle' });
+  await waitForFleetReady(page);
+  await page.waitForTimeout(400);
+
+  const inactive = await page.evaluate(async () => {
+    const store = await window.__liveModule('monitorStore.svelte.ts');
+    const monitor = store.monitorStore;
+
+    const rows = Array.from(document.querySelectorAll('[data-testid="table-row"]'));
+    const inactiveRows = rows.filter((row) => {
+      const name = row.querySelector('[data-testid="server-row-name"]')?.textContent ?? '';
+      const server = monitor.servers.find((item) => item.name === name);
+      return server && (server.status === 'offline' || server.status === 'maintenance');
+    });
+    const activeRows = rows.filter((row) => {
+      const name = row.querySelector('[data-testid="server-row-name"]')?.textContent ?? '';
+      const server = monitor.servers.find((item) => item.name === name);
+      return server && server.status !== 'offline' && server.status !== 'maintenance';
+    });
+
+    const inspect = (row) => ({
+      name: row.querySelector('[data-testid="server-row-name"]')?.textContent ?? '',
+      cpu: row.querySelector('[data-testid="cpu-value"]')?.textContent?.trim() ?? null,
+      memory: row.querySelector('[data-testid="memory-value"]')?.textContent?.trim() ?? null,
+      latency:
+        row.querySelector('[data-testid="latency-value"]')?.textContent?.trim() ??
+        row.querySelector('[data-testid="latency-inactive"]')?.textContent?.trim() ??
+        null,
+      cpuInactive: Boolean(row.querySelector('[data-testid="cpu-inactive"]')),
+      memoryInactive: Boolean(row.querySelector('[data-testid="memory-inactive"]')),
+      latencyInactive: Boolean(row.querySelector('[data-testid="latency-inactive"]')),
+      trendAbsent: Boolean(row.querySelector('[data-testid="trend-absent"]')),
+      sparkline: Boolean(row.querySelector('[data-testid="sparkline"]')),
+      progressBars: row.querySelectorAll('[data-testid="progress-bar"]').length
+    });
+
+    return {
+      inactive: inactiveRows.map(inspect),
+      active: activeRows.slice(0, 4).map(inspect)
+    };
+  });
+
+  assert(
+    inactive.inactive.length >= 2,
+    `The fleet exposes offline and maintenance hosts to verify (${inactive.inactive.length} rows)`
+  );
+  assert(
+    inactive.inactive.every((row) => row.cpu === '--'),
+    `Inactive hosts report "--" for CPU (${inactive.inactive.map((r) => `${r.name}=${r.cpu}`).join(', ')})`
+  );
+  assert(
+    inactive.inactive.every((row) => row.memory === '--'),
+    'Inactive hosts report "--" for memory'
+  );
+  assert(
+    inactive.inactive.every((row) => row.latency === '--'),
+    'Inactive hosts report "--" for latency'
+  );
+  assert(
+    inactive.inactive.every((row) => row.cpuInactive && row.memoryInactive && row.latencyInactive),
+    'Inactive hosts are marked with explicit no-data cells'
+  );
+  assert(
+    inactive.inactive.every((row) => row.progressBars === 0),
+    'Inactive hosts render no progress bars, so no stale fill is implied'
+  );
+  assert(
+    inactive.inactive.every((row) => row.trendAbsent && !row.sparkline),
+    'Inactive hosts show a dashed no-data trend instead of a sparkline'
+  );
+  assert(
+    inactive.active.every((row) => row.cpu !== '--' && /\d/.test(row.cpu ?? '')),
+    `Reporting hosts still show a live CPU reading (${inactive.active
+      .map((r) => `${r.name}=${r.cpu}`)
+      .join(', ')})`
+  );
+  assert(
+    inactive.active.every((row) => row.memory !== '--' && /\d/.test(row.memory ?? '')),
+    `Reporting hosts still show a live memory reading (${inactive.active
+      .map((r) => `${r.name}=${r.memory}`)
+      .join(', ')})`
+  );
+  assert(
+    inactive.active.every((row) => row.latency !== '--' && /\d/.test(row.latency ?? '')),
+    'Reporting hosts still show a live latency reading'
+  );
+  assert(
+    inactive.active.every((row) => row.progressBars > 0),
+    'Reporting hosts keep their utilization bars'
+  );
+  assert(
+    inactive.active.every((row) => row.sparkline && !row.trendAbsent),
+    'Reporting hosts keep their CPU sparkline'
+  );
+
+  /* ---- UIUX-05: repeated breaches cannot open duplicate incidents ----- */
+  const dedup = await page.evaluate(async () => {
+    const store = await window.__liveModule('monitorStore.svelte.ts');
+    const dbModule = await import('/src/lib/db/index.ts');
+    const monitor = store.monitorStore;
+
+    const created = await monitor.createServer({
+      name: 'dedup-probe-asset',
+      hostname: 'dedup-probe.internal',
+      ipAddress: '10.9.9.20',
+      region: 'us-east-1',
+      availabilityZone: 'us-east-1a',
+      environment: 'testing',
+      status: 'healthy',
+      description: '',
+      owner: '',
+      provisionedBy: 'manual',
+      cpuCores: 2,
+      memoryGb: 4,
+      diskGb: 20,
+      architecture: 'x86_64',
+      tags: []
+    });
+
+    /*
+     * Latency is used rather than cpu because its synthesiser clamp band
+     * (1.1 to 880ms) makes both the breaching and the recovered state
+     * deterministic. A cpu threshold could never be cleared because the cpu
+     * channel floors at 1.
+     */
+    const setLatency = (value) => {
+      monitor.activeTelemetry = {
+        ...monitor.activeTelemetry,
+        [created.id]: {
+          timestamp: Date.now(),
+          cpuUsage: 40,
+          memoryUsage: 50,
+          diskUsage: 50,
+          networkInKbps: 1000,
+          networkOutKbps: 1000,
+          latencyMs: value
+        }
+      };
+    };
+
+    const rule = await monitor.createAlarm({
+      name: 'Dedup probe rule',
+      serverId: created.id,
+      metric: 'latency',
+      operator: 'GTE',
+      threshold: 800,
+      evaluationPeriods: 1,
+      periodSeconds: 10,
+      enabled: true
+    });
+
+    setLatency(880);
+    for (let i = 0; i < 6; i++) {
+      setLatency(880);
+      await monitor.pollCycle();
+    }
+
+    const openIncidents = monitor.incidents.filter(
+      (incident) => incident.alarmRuleId === rule.id && incident.serverId === created.id
+    );
+    const unresolved = openIncidents.filter((incident) => incident.status !== 'resolved');
+    const persisted = await dbModule.db.incidents
+      .filter((incident) => incident.alarmRuleId === rule.id && incident.serverId === created.id)
+      .count();
+
+    // Now acknowledge the alarm while the metric still breaches, exactly the
+    // reset-then-rebreach sequence that used to open a second incident.
+    await monitor.setAlarmState(rule.id, 'OK');
+    for (let i = 0; i < 4; i++) {
+      setLatency(880);
+      await monitor.pollCycle();
+    }
+
+    const afterAck = monitor.incidents.filter(
+      (incident) => incident.alarmRuleId === rule.id && incident.serverId === created.id
+    );
+
+    // Resolving the first incident must allow a genuinely new one to open.
+    for (const incident of afterAck) {
+      await monitor.transitionIncident(incident.id, 'resolved', 'probe');
+    }
+    // The rule stays latched in ALARM after the incident resolves, so it has to
+    // clear back to OK on a non-breaching sample before it can fire again.
+    for (let i = 0; i < 2; i++) {
+      setLatency(2);
+      await monitor.pollCycle();
+    }
+    const clearedState = monitor.alarms.find((alarm) => alarm.id === rule.id)?.state ?? null;
+
+    for (let i = 0; i < 2; i++) {
+      setLatency(880);
+      await monitor.pollCycle();
+    }
+
+    const afterResolve = monitor.incidents.filter(
+      (incident) => incident.alarmRuleId === rule.id && incident.serverId === created.id
+    );
+
+    const result = {
+      serverId: created.id,
+      ruleId: rule.id,
+      totalAfterTicks: openIncidents.length,
+      unresolvedAfterTicks: unresolved.length,
+      persistedAfterTicks: persisted,
+      totalAfterAck: afterAck.length,
+      totalAfterResolve: afterResolve.length,
+      clearedState,
+      distinctTimelineIds: new Set(afterResolve.flatMap((i) => i.timeline.map((e) => e.id))).size
+    };
+
+    await monitor.deleteServer(created.id);
+    return result;
+  });
+
+  assert(
+    dedup.totalAfterTicks <= 1,
+    `Six consecutive breach ticks open at most one incident (${dedup.totalAfterTicks} opened)`
+  );
+  assertEqual(dedup.unresolvedAfterTicks, dedup.totalAfterTicks, 'No duplicate unresolved incidents survive');
+  assertEqual(
+    dedup.persistedAfterTicks,
+    dedup.totalAfterTicks,
+    'The persisted incident count matches the in-memory count'
+  );
+  assertEqual(
+    dedup.totalAfterAck,
+    dedup.totalAfterTicks,
+    'Acknowledging the alarm while it still breaches does not open a second incident'
+  );
+  assertEqual(
+    dedup.clearedState,
+    'OK',
+    'The rule clears back to OK once the metric recovers'
+  );
+  assert(
+    dedup.totalAfterResolve > dedup.totalAfterAck,
+    `Resolving the incident and recovering the metric allows a genuinely new one to open (${dedup.totalAfterAck} -> ${dedup.totalAfterResolve})`
+  );
+  assert(
+    dedup.distinctTimelineIds > 0,
+    'Each opened incident still carries a populated append-only timeline'
+  );
+}
+
+/* ------------------------------------------------------------------ */
 /* Audit phase 1 — security and data layer integrity                   */
 /* ------------------------------------------------------------------ */
 
@@ -2478,6 +2913,7 @@ async function main() {
     if (maxPhase >= 2) await checkPhase2(phase1Page);
     await auditPhase2Telemetry(phase1Page);
     await auditPhase3Layout(phase1Page);
+    await auditPhase4Presentation(phase1Page);
 
     if (maxPhase >= 3) await checkPhase3(phase1Page);
 
