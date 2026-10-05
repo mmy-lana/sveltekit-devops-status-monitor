@@ -33,7 +33,7 @@
   import MetricChart from '$lib/components/compound/MetricChart.svelte';
   import TimeRangeSelector from '$lib/components/compound/TimeRangeSelector.svelte';
   import { METRIC_LABELS, METRIC_ORDER, METRIC_UNITS } from '$lib/utils/alarmUtils';
-  import { formatBytes } from '$lib/utils/formatting';
+  import { formatBytes, formatMetricValue } from '$lib/utils/formatting';
 
   let {
     serverName,
@@ -128,7 +128,7 @@
       height={240}
       stacked
       label={`${METRIC_LABELS[activeMetric]} for ${serverName} over the last ${range}`}
-      formatValue={(item, value) => formatBytes(value)}
+      formatValue={(item, value) => formatMetricValue(value, item.unit)}
       emptyTitle={`No ${METRIC_LABELS[activeMetric].toLowerCase()} samples in the last ${range}`}
     />
 

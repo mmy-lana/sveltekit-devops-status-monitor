@@ -398,6 +398,12 @@ async function checkPhase1(page) {
 async function checkPhase2(page) {
   section('Phase 2 · Design Foundation & Primitives');
 
+  // This suite asserts against the fleet dashboard, so navigate explicitly
+  // rather than depending on whatever route the previous suite left open.
+  await page.goto(`${BASE_URL}/`, { waitUntil: 'networkidle' });
+  await waitForFleetReady(page);
+  await page.waitForTimeout(300);
+
   const tokens = await page.evaluate(() => {
     const styles = getComputedStyle(document.documentElement);
     const readToken = (token) => styles.getPropertyValue(token).trim();
@@ -484,7 +490,9 @@ async function checkPhase2(page) {
   // ---- Button tap targets -----------------------------------------------
   const buttons = await page.evaluate(() =>
     Array.from(
-      document.querySelectorAll('[data-testid="button"], [data-testid="filter-reset"]')
+      document.querySelectorAll(
+        '[data-testid="button"], [data-testid="filter-reset"], [data-testid="asset-create"]'
+      )
     ).map((el) => {
       const rect = el.getBoundingClientRect();
       return {
@@ -495,7 +503,7 @@ async function checkPhase2(page) {
       };
     })
   );
-  assert(buttons.length >= 2, `Dashboard renders ${buttons.length} Button primitives across the shell and toolbar`);
+  assert(buttons.length >= 3, `Dashboard renders ${buttons.length} Button primitives across the shell and toolbar`);
   assert(
     buttons.every((b) => b.w >= 44 && b.h >= 44),
     'Every Button clears the 44x44 minimum tap target',
@@ -1337,6 +1345,318 @@ async function checkPhase4(page) {
   assert((mttr ?? '').length > 0, `Mean time to resolve is surfaced on the register (${mttr?.trim()})`);
 }
 /* ------------------------------------------------------------------ */
+/* Audit phase 2 — state, logic and performance                        */
+/* ------------------------------------------------------------------ */
+
+async function auditPhase2Telemetry(page) {
+  section('Audit Phase 2 · Telemetry Logic & State');
+
+  /* ---- DATA-02: unit-aware chart readout (pure formatter) ------------- */
+  const formatter = await page.evaluate(async () => {
+    const fmt = await import('/src/lib/utils/formatting.ts');
+    return {
+      cpu: fmt.formatMetricValue(45.25, '%'),
+      memory: fmt.formatMetricValue(88.75, '%'),
+      latency: fmt.formatMetricValue(241.5, 'ms'),
+      network: fmt.formatMetricValue(18_400, 'Kbps'),
+      networkBig: fmt.formatMetricValue(4_500_000, 'Kbps'),
+      kbpsOfCpu: fmt.formatMetricValue(45.25, 'Kbps')
+    };
+  });
+
+  assertEqual(formatter.cpu, '45.3%', 'formatMetricValue renders a cpu sample as a percentage');
+  assertEqual(formatter.memory, '88.8%', 'formatMetricValue renders a memory sample as a percentage');
+  assertEqual(formatter.latency, '241.5ms', 'formatMetricValue renders a latency sample in milliseconds');
+  assertEqual(formatter.network, '18.4 Mbps', 'formatMetricValue scales a bandwidth sample to Mbps');
+  assertEqual(formatter.networkBig, '4.50 Gbps', 'formatMetricValue scales a large bandwidth sample to Gbps');
+  assert(
+    formatter.kbpsOfCpu.includes('Kbps'),
+    'formatMetricValue honours the caller-supplied unit rather than assuming one'
+  );
+
+  /* ---- DATA-04: non-negative MTTR -------------------------------------- */
+  const mttr = await page.evaluate(async () => {
+    const engine = await import('/src/lib/engine/alarmEvaluator.ts');
+    const base = {
+      id: 'inc-mttr',
+      serverId: 'srv-a',
+      serverName: 'srv-a',
+      alarmRuleId: null,
+      title: 'probe',
+      severity: 'SEV-3',
+      status: 'resolved',
+      startedAt: 100_000,
+      resolvedAt: null,
+      timeline: []
+    };
+
+    const skewed = { ...base, id: 'skewed', resolvedAt: 95_000 };
+    const future = { ...base, id: 'future', resolvedAt: 400_000 };
+    const exact = { ...base, id: 'exact', resolvedAt: 100_000 };
+    const normal = { ...base, id: 'normal', resolvedAt: 130_000 };
+    const unresolved = { ...base, id: 'unresolved', resolvedAt: null, status: 'open' };
+
+    return {
+      skewedOnly: engine.meanTimeToResolve([skewed]),
+      mixed: engine.meanTimeToResolve([skewed, future]),
+      exactOnly: engine.meanTimeToResolve([exact]),
+      normalAndUnresolved: engine.meanTimeToResolve([normal, unresolved]),
+      skewedDuration: engine.resolvedDurationMs(skewed),
+      futureDuration: engine.resolvedDurationMs(future),
+      noneResolved: engine.meanTimeToResolve([unresolved])
+    };
+  });
+
+  assertEqual(mttr.skewedOnly, 0, 'A clock-skewed incident contributes zero, not a negative duration');
+  assertEqual(mttr.skewedDuration, 0, 'resolvedDurationMs clamps a negative elapsed time to zero');
+  assertEqual(mttr.exactOnly, 0, 'An incident resolved at its start has zero elapsed time');
+  assertEqual(mttr.futureDuration, 300_000, 'A correctly ordered incident reports its true elapsed time');
+  assertEqual(mttr.mixed, 150_000, 'A skewed incident cannot drag the fleet mean below its true value');
+  assertEqual(mttr.normalAndUnresolved, 30_000, 'Unresolved incidents are excluded from the mean');
+  assertEqual(mttr.noneResolved, null, 'The mean is null when nothing has been resolved');
+
+  /* ---- STATE-01: NaN-hardened clamping --------------------------------- */
+  const clamp = await page.evaluate(async () => {
+    const stats = await import('/src/lib/utils/statistics.ts');
+    const dbModule = await import('/src/lib/db/index.ts');
+    const store = await window.__liveModule('monitorStore.svelte.ts');
+
+    const monitor = store.monitorStore;
+    const target = monitor.servers.find((s) => s.status !== 'offline' && s.status !== 'maintenance');
+    if (!target) return { skipped: true };
+
+    // Corrupt the persisted latest sample with NaN, which structuredClone
+    // preserves, so the very next synthesiser call reads a poisoned input.
+    const latest = await dbModule.db.telemetry
+      .where('[serverId+timestamp]')
+      .between([target.id, -Infinity], [target.id, Infinity], true, true)
+      .last();
+    if (!latest) return { skipped: true };
+
+    const poisoned = {
+      ...latest,
+      metrics: {
+        ...latest.metrics,
+        cpuUsage: Number.NaN,
+        memoryUsage: Number.NaN,
+        latencyMs: Number.NaN,
+        networkInKbps: Number.NaN,
+        networkOutKbps: Number.NaN
+      }
+    };
+    await dbModule.db.telemetry.put(poisoned);
+    monitor.activeTelemetry = { ...monitor.activeTelemetry, [target.id]: poisoned.metrics };
+
+    await monitor.pollCycle();
+
+    const recovered = monitor.activeTelemetry[target.id];
+    const result = {
+      skipped: false,
+      id: target.id,
+      nanToMin: stats.clamp(Number.NaN, 1, 100),
+      nanAbove: stats.clamp(Number.NaN, 5, 99),
+      nanInfinity: stats.clamp(Number.POSITIVE_INFINITY, 1, 100),
+      normalHigh: stats.clamp(500, 1, 100),
+      normalLow: stats.clamp(-5, 1, 100),
+      cpu: recovered?.cpuUsage,
+      memory: recovered?.memoryUsage,
+      latency: recovered?.latencyMs,
+      networkIn: recovered?.networkInKbps,
+      networkOut: recovered?.networkOutKbps,
+      disk: recovered?.diskUsage
+    };
+
+    await dbModule.db.telemetry.delete(poisoned.id ?? 0);
+    return result;
+  });
+
+  assertEqual(clamp.skipped, false, 'A live server was available for the NaN recovery probe');
+  assertEqual(clamp.nanToMin, 1, 'clamp maps NaN to the lower bound for cpu');
+  assertEqual(clamp.nanAbove, 5, 'clamp maps NaN to the lower bound for memory');
+  assertEqual(clamp.nanInfinity, 100, 'clamp bounds an infinite input to the upper bound');
+  assertEqual(clamp.normalHigh, 100, 'clamp bounds an over-range input to the upper bound');
+  assertEqual(clamp.normalLow, 1, 'clamp bounds an under-range input to the lower bound');
+  assert(
+    Number.isFinite(clamp.cpu) && clamp.cpu >= 1 && clamp.cpu <= 100,
+    `A NaN cpu reading recovers to a bounded value (cpuUsage=${clamp.cpu})`
+  );
+  assert(
+    Number.isFinite(clamp.memory) && clamp.memory >= 5 && clamp.memory <= 99,
+    `A NaN memory reading recovers to a bounded value (memoryUsage=${clamp.memory})`
+  );
+  assert(
+    Number.isFinite(clamp.latency) && clamp.latency >= 1.1,
+    `A NaN latency reading recovers to a bounded value (latencyMs=${clamp.latency})`
+  );
+  assert(Number.isFinite(clamp.networkIn), `A NaN network-in reading recovers (networkInKbps=${clamp.networkIn})`);
+  assert(Number.isFinite(clamp.networkOut), `A NaN network-out reading recovers (networkOutKbps=${clamp.networkOut})`);
+  assert(Number.isFinite(clamp.disk), `Disk utilisation stays finite (diskUsage=${clamp.disk})`);
+
+  /* ---- PERF-01: pruning decoupled from the poll loop ------------------- */
+  const perf = await page.evaluate(async () => {
+    const store = await window.__liveModule('monitorStore.svelte.ts');
+    const dbModule = await import('/src/lib/db/index.ts');
+
+    const monitor = store.monitorStore;
+    const durations = [];
+    for (let i = 0; i < 5; i++) {
+      const startedAt = performance.now();
+      await monitor.pollCycle();
+      durations.push(performance.now() - startedAt);
+    }
+
+    const pruneStartedAt = performance.now();
+    await monitor.pruneIfDue(true);
+    const forcedPruneMs = performance.now() - pruneStartedAt;
+
+    // Second call inside the throttle window must be a no-op.
+    const skippedStartedAt = performance.now();
+    await monitor.pruneIfDue();
+    const skippedPruneMs = performance.now() - skippedStartedAt;
+
+    const stats = await dbModule.db.telemetry.count();
+    return {
+      durations,
+      maxMs: Math.max(...durations),
+      meanMs: durations.reduce((a, b) => a + b, 0) / durations.length,
+      forcedPruneMs,
+      skippedPruneMs,
+      pruneStatePresent: typeof monitor.lastPruneAt === 'number',
+      lastPruneAt: monitor.lastPruneAt,
+      telemetryRows: stats
+    };
+  });
+
+  assert(perf.pruneStatePresent, 'The store tracks the last retention prune timestamp');
+  assert(
+    perf.maxMs < 50,
+    `Five consecutive poll cycles each complete under 50ms (max ${perf.maxMs.toFixed(1)}ms, mean ${perf.meanMs.toFixed(1)}ms)`
+  );
+  assert(
+    perf.skippedPruneMs < 5,
+    `A prune inside the throttle window returns immediately (${perf.skippedPruneMs.toFixed(2)}ms)`
+  );
+  assert(perf.lastPruneAt > 0, 'The retention prune recorded its execution time');
+  assert(perf.telemetryRows > 0, 'Telemetry rows survive the refactored poll transaction');
+
+  /* ---- UI-03: fleet-wide thresholds on the instance chart -------------- */
+  await page.goto(`${BASE_URL}/servers/srv-use1-api-01`, { waitUntil: 'networkidle' });
+  await waitForFleetReady(page);
+  await page.waitForSelector('[data-testid="metric-chart"]', { timeout: 20_000 });
+  await page.waitForTimeout(600);
+
+  const guides = await page.evaluate(() => {
+    const lines = Array.from(document.querySelectorAll('[data-testid="metric-chart"] [data-threshold]'));
+    return {
+      count: lines.length,
+      labels: Array.from(
+        document.querySelectorAll('[data-testid="metric-chart"] text')
+      )
+        .map((t) => t.textContent ?? '')
+        .filter((t) => /^(cpu|memory|disk|latency|networkIn|networkOut) /.test(t))
+    };
+  });
+
+  assert(guides.count > 0, 'The instance chart renders threshold guides');
+  assert(
+    guides.labels.some((label) => /^cpu /.test(label)),
+    `The fleet-wide CPU Saturation rule appears as a guide (${guides.labels.join(' | ') || 'none'})`
+  );
+
+  /* ---- STATE-02: chart follows the collector --------------------------- */
+  const beforeTick = await page.evaluate(() => ({
+    lastTick: window.__probeLastTick ?? null,
+    points: document.querySelectorAll('[data-testid="metric-chart"] polyline[data-series]').length
+  }));
+
+  const pointsBefore = await page.evaluate(() => {
+    const poly = document.querySelector('[data-testid="metric-chart"] polyline[data-series]');
+    return poly?.getAttribute('points') ?? '';
+  });
+
+  await page.evaluate(async () => {
+    const store = await window.__liveModule('monitorStore.svelte.ts');
+    window.__probeLastTick = Date.now();
+    await store.monitorStore.pollCycle();
+  });
+  await page.waitForTimeout(1500);
+
+  const afterTick = await page.evaluate(() => {
+    const poly = document.querySelector('[data-testid="metric-chart"] polyline[data-series]');
+    const full = poly?.getAttribute('points') ?? '';
+    const parts = full.split(' ').filter(Boolean);
+    return {
+      points: document.querySelectorAll('[data-testid="metric-chart"] polyline[data-series]').length,
+      full,
+      lastPoint: parts[parts.length - 1] ?? '',
+      errorBanner: Boolean(document.querySelector('[data-testid="telemetry-error"]')),
+      stillPlotted: parts.length
+    };
+  });
+
+  assertEqual(afterTick.errorBanner, false, 'A successful poll does not raise the telemetry error boundary');
+  assert(afterTick.stillPlotted > 2, 'The chart still holds a populated series after the poll tick');
+  assert(
+    afterTick.full !== pointsBefore,
+    `A poll tick advances the plotted series (${pointsBefore.split(' ').slice(-1)[0]} -> ${afterTick.lastPoint})`
+  );
+
+  /* ---- DATA-02: live scrub readout carries the correct unit ----------- */
+  const chartBox = await page.locator('[data-testid="metric-chart"]').boundingBox();
+  if (chartBox) {
+    await page.mouse.move(chartBox.x + chartBox.width * 0.55, chartBox.y + chartBox.height * 0.5);
+    await page.waitForTimeout(350);
+    const readout = await page.evaluate(() => {
+      const node = document.querySelector('[data-testid="chart-readout"]');
+      return node?.textContent ?? '';
+    });
+
+    assert(readout.includes('cpu'), 'The scrub readout names the CPU series');
+    assert(readout.includes('%'), `The CPU scrub readout uses a percentage (${readout.trim()})`);
+    assert(!readout.includes('Kbps'), 'The CPU scrub readout never reports a bandwidth unit');
+    assert(!readout.includes('Mbps'), 'The CPU scrub readout never reports a scaled bandwidth unit');
+  }
+
+  /* ---- STATE-02: error boundaries are reachable ----------------------- */
+  const boundaries = await page.evaluate(async () => {
+    const dbModule = await import('/src/lib/db/index.ts');
+    const table = dbModule.db.telemetry;
+    const originalWhere = table.where.bind(table);
+    // loadMetricSeries reads through the [serverId+timestamp] compound index,
+    // so the injected fault has to sit on that path rather than on Table#toArray.
+    table.where = (index) => {
+      if (index !== '[serverId+timestamp]') return originalWhere(index);
+      return {
+        between: () => ({
+          toArray: () => Promise.reject(new Error('synthetic telemetry read failure'))
+        })
+      };
+    };
+    return { patched: true };
+  });
+  assertEqual(boundaries.patched, true, 'Telemetry read path is interceptable for fault injection');
+
+  await page.locator('[data-testid="metric-tab"]').nth(2).click();
+  await page.waitForTimeout(1600);
+  const injected = await page.locator('[data-testid="telemetry-error"]').count();
+  assert(injected > 0, 'A failed telemetry read surfaces the error boundary instead of a blank chart');
+
+  await page.locator('[data-testid="telemetry-retry"]').click();
+  await page.waitForTimeout(400);
+  assert((await page.locator('[data-testid="telemetry-retry"]').count()) > 0, 'The error boundary offers a retry affordance');
+
+  await page.reload({ waitUntil: 'networkidle' });
+  await waitForFleetReady(page);
+  await page.waitForSelector('[data-testid="metric-chart"]', { timeout: 20_000 });
+  await page.waitForTimeout(500);
+  assertEqual(
+    await page.locator('[data-testid="telemetry-error"]').count(),
+    0,
+    'The error boundary clears once the store recovers'
+  );
+}
+
+/* ------------------------------------------------------------------ */
 /* Audit phase 1 — security and data layer integrity                   */
 /* ------------------------------------------------------------------ */
 
@@ -1462,7 +1782,7 @@ async function auditPhase1Security(page) {
   const pollution = await page.evaluate(async () => {
     delete Object.prototype.polluted;
 
-    const store = await import('/src/lib/stores/monitorStore.svelte.ts');
+    const store = await window.__liveModule('monitorStore.svelte.ts');
     const created = await store.monitorStore.createServer({
       name: 'redos-probe-asset',
       hostname: 'redos-probe.internal',
@@ -1534,7 +1854,7 @@ async function auditPhase1Security(page) {
 
   /* ---- DATA-03: cascade alarm deletion --------------------------------- */
   const cascade = await page.evaluate(async () => {
-    const store = await import('/src/lib/stores/monitorStore.svelte.ts');
+    const store = await window.__liveModule('monitorStore.svelte.ts');
     const dbModule = await import('/src/lib/db/index.ts');
     const engine = await import('/src/lib/engine/alarmEvaluator.ts');
 
@@ -1850,6 +2170,24 @@ async function checkPhase5(page, diagnostics) {
 async function main() {
   const browser = await chromium.launch();
   const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+
+  // Vite serves app modules with an HMR cache-busting query string
+  // (for example monitorStore.svelte.ts?t=1791169972053). A bare specifier
+  // would therefore resolve to a SECOND, disconnected module instance and every
+  // stateful assertion would quietly test an orphan. This resolves the real URL
+  // from the resource timeline instead.
+  await context.addInitScript(() => {
+    window.__liveModule = async (needle) => {
+      const candidates = performance
+        .getEntriesByType('resource')
+        .map((entry) => entry.name)
+        .filter((name) => name.includes(needle) && name.includes('/src/'));
+      const url = candidates[candidates.length - 1];
+      if (!url) throw new Error(`module not loaded by the app: ${needle}`);
+      return import(url);
+    };
+  });
+
   const diagnostics = [];
 
   const phase1Page = await context.newPage();
@@ -1864,6 +2202,7 @@ async function main() {
     if (maxPhase >= 1) await checkPhase1(phase1Page);
     await auditPhase1Security(phase1Page);
     if (maxPhase >= 2) await checkPhase2(phase1Page);
+    await auditPhase2Telemetry(phase1Page);
 
     if (maxPhase >= 3) await checkPhase3(phase1Page);
 

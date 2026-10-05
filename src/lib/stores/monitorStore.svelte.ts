@@ -1,5 +1,5 @@
 import Dexie from 'dexie';
-import { db, seedInitialDataIfEmpty } from '$lib/db';
+import { db, pruneExpiredData, seedInitialDataIfEmpty } from '$lib/db';
 import {
   applyEvaluations,
   evaluateRules,
@@ -25,6 +25,9 @@ import type {
 import { METRIC_UNITS, extractMetricValue } from '$lib/utils/alarmUtils';
 import { ID_PREFIXES, generateEntityId } from '$lib/utils/id';
 import { clamp, summarizeMetricSeries } from '$lib/utils/statistics';
+
+/** Minimum wall-clock gap between retention sweeps, in milliseconds. */
+const PRUNE_INTERVAL_MS = 10 * 60 * 1000;
 
 const CRITICAL = { cpu: 90, memory: 92, latency: 250 } as const;
 const WARNING = { cpu: 75, memory: 80, latency: 100 } as const;
@@ -100,29 +103,47 @@ function plain<T>(value: T): T {
  * Bounded noise rides on top of the previous reading, offset by a slow sine so
  * charts show a believable workload shape rather than white noise.
  */
+/**
+ * Coerce a possibly corrupted channel back into a usable number.
+ *
+ * `Math.max(min, NaN)` is NaN, so every channel is funnelled through here
+ * rather than relying on arithmetic that silently propagates a bad reading.
+ */
+function finiteOr(value: number, fallback: number): number {
+  return Number.isFinite(value) ? value : fallback;
+}
+
 function nextSample(previous: MetricDataPoint, now: number): MetricDataPoint {
   const drift = Math.sin(now / 900_000);
 
+  // Seed every channel so a single corrupted field cannot poison the rest of
+  // the sample through the arithmetic below.
+  const cpuBase = finiteOr(previous.cpuUsage, BOOTSTRAP_SAMPLE.cpuUsage);
+  const memoryBase = finiteOr(previous.memoryUsage, BOOTSTRAP_SAMPLE.memoryUsage);
+  const diskBase = finiteOr(previous.diskUsage, BOOTSTRAP_SAMPLE.diskUsage);
+  const networkInBase = finiteOr(previous.networkInKbps, BOOTSTRAP_SAMPLE.networkInKbps);
+  const networkOutBase = finiteOr(previous.networkOutKbps, BOOTSTRAP_SAMPLE.networkOutKbps);
+  const latencyBase = finiteOr(previous.latencyMs, BOOTSTRAP_SAMPLE.latencyMs);
+
+  const cpu = clamp(cpuBase + (Math.random() - 0.5) * 7 + drift * 1.6, 1, 100);
+  const memory = clamp(memoryBase + (Math.random() - 0.5) * 1.8 + drift * 0.5, 5, 99);
+  const disk = clamp(diskBase + (Math.random() - 0.5) * 0.12, 1, 98);
+  const networkIn = clamp(networkInBase * (0.94 + Math.random() * 0.14) + drift * 400, 120, 10_000_000);
+  const networkOut = clamp(
+    networkOutBase * (0.94 + Math.random() * 0.14) + drift * 520,
+    160,
+    10_000_000
+  );
+  const latency = clamp(latencyBase + (Math.random() - 0.5) * 3.4 + drift * 2.2, 1.1, 880);
+
   return {
     timestamp: now,
-    cpuUsage: Number(
-      clamp(previous.cpuUsage + (Math.random() - 0.5) * 7 + drift * 1.6, 1, 100).toFixed(1)
-    ),
-    memoryUsage: Number(
-      clamp(previous.memoryUsage + (Math.random() - 0.5) * 1.8 + drift * 0.5, 5, 99).toFixed(1)
-    ),
-    diskUsage: Number(Math.min(98, previous.diskUsage + (Math.random() - 0.5) * 0.12).toFixed(2)),
-    networkInKbps: Math.max(
-      120,
-      Math.round(previous.networkInKbps * (0.94 + Math.random() * 0.14) + drift * 400)
-    ),
-    networkOutKbps: Math.max(
-      160,
-      Math.round(previous.networkOutKbps * (0.94 + Math.random() * 0.14) + drift * 520)
-    ),
-    latencyMs: Number(
-      clamp(previous.latencyMs + (Math.random() - 0.5) * 3.4 + drift * 2.2, 1.1, 880).toFixed(1)
-    )
+    cpuUsage: Number(cpu.toFixed(1)),
+    memoryUsage: Number(memory.toFixed(1)),
+    diskUsage: Number(disk.toFixed(2)),
+    networkInKbps: Math.round(networkIn),
+    networkOutKbps: Math.round(networkOut),
+    latencyMs: Number(latency.toFixed(1))
   };
 }
 
@@ -161,6 +182,8 @@ class MonitorState {
   autoRefreshInterval = $state<number>(15000);
   isPaused = $state<boolean>(false);
   lastPollAt = $state<number | null>(null);
+  /** Timestamp of the most recent retention prune. */
+  lastPruneAt = $state<number>(0);
 
   private timer: number | null = null;
   private sparklineTimer: number | null = null;
@@ -230,6 +253,7 @@ class MonitorState {
     try {
       await seedInitialDataIfEmpty();
       await this.loadAll();
+      await this.pruneIfDue(true);
       await this.refreshSparklines();
       this.startPolling();
       this.startSparklinePolling();
@@ -277,6 +301,24 @@ class MonitorState {
     this.autoRefreshInterval = ms;
     this.isPaused = ms <= 0;
     this.startPolling();
+  }
+
+  /**
+   * Run retention pruning if the throttle window has elapsed.
+   *
+   * Called once per poll tick but only performs work every
+   * {@link PRUNE_INTERVAL_MS}, keeping range deletes off the hot path.
+   */
+  async pruneIfDue(force = false): Promise<void> {
+    if (typeof window === 'undefined') return;
+    const now = Date.now();
+    if (!force && now - this.lastPruneAt < PRUNE_INTERVAL_MS) return;
+    this.lastPruneAt = now;
+    try {
+      await pruneExpiredData(now);
+    } catch (error) {
+      this.error = error instanceof Error ? error.message : 'Retention prune failed';
+    }
   }
 
   startPolling(): void {
@@ -363,26 +405,24 @@ class MonitorState {
         changedServers.push(updated);
       }
 
-      const cutoff = now - 7 * 24 * 60 * 60 * 1000;
-      await db.transaction(
-        'rw',
-        [db.servers, db.telemetry, db.alarms, db.logs, db.incidents],
-        async () => {
-          if (changedServers.length > 0) await db.servers.bulkPut(plain(changedServers));
-          if (newTelemetryRows.length > 0) await db.telemetry.bulkAdd(plain(newTelemetryRows));
-          if (newLogRows.length > 0) await db.logs.bulkAdd(plain(newLogRows));
-          await db.alarms.bulkPut(plain(alarms));
-          if (openedIncidents.length > 0) await db.incidents.bulkAdd(plain(openedIncidents));
-          await db.telemetry.where('timestamp').below(cutoff).delete();
-          await db.logs.where('timestamp').below(cutoff).delete();
-        }
-      );
+      // The transaction lists exactly the tables written this tick. Retention
+      // pruning is deliberately excluded: a range delete across thousands of
+      // rows has no business running every 5 to 15 seconds.
+      const written = [db.servers, db.telemetry, db.alarms, db.logs, db.incidents];
+      await db.transaction('rw', written, async () => {
+        if (changedServers.length > 0) await db.servers.bulkPut(plain(changedServers));
+        if (newTelemetryRows.length > 0) await db.telemetry.bulkAdd(plain(newTelemetryRows));
+        if (newLogRows.length > 0) await db.logs.bulkAdd(plain(newLogRows));
+        await db.alarms.bulkPut(plain(alarms));
+        if (openedIncidents.length > 0) await db.incidents.bulkAdd(plain(openedIncidents));
+      });
 
       this.activeTelemetry = telemetry;
       this.servers = servers;
       this.alarms = alarms;
       if (openedIncidents.length > 0) this.incidents = [...openedIncidents, ...this.incidents];
       this.lastPollAt = now;
+      void this.pruneIfDue();
     } catch (error) {
       this.error = error instanceof Error ? error.message : 'Telemetry cycle failed';
     } finally {

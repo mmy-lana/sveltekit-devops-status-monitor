@@ -34,6 +34,9 @@
   const DEFAULT_COLORS = ['#38bdf8', '#f59e0b'];
   const GRID_COUNT = 4;
 
+  /** How far outside the observed range a threshold may sit to stay on-canvas. */
+  const THRESHOLD_DOMAIN_FACTOR = 4;
+
   /** Round a domain out to a friendly axis bound. */
   function niceBound(value: number): number {
     if (value <= 0) return 1;
@@ -79,14 +82,41 @@
   const primary = $derived(series[0] ?? null);
   const secondary = $derived(series[1] ?? null);
 
-  const primaryDomain = $derived.by(() => {
-    if (!primary || primary.values.length === 0) return { min: 0, max: 1 };
-    const min = calculateMin(primary.values);
-    const max = calculateMax(primary.values);
+  /**
+   * Widen the data domain to include any threshold guide that is plausibly
+   * near the observed range.
+   *
+   * An alarm threshold above every sample is precisely the case where the
+   * operator wants to see the line, but a naive data-derived scale would place
+   * it off-canvas and silently omit it. A threshold more than
+   * {@link THRESHOLD_DOMAIN_FACTOR} times the observed maximum is treated as
+   * unrelated to this window and left out so it cannot squash the series.
+   */
+  function domainWithThresholds(
+    values: number[],
+    guides: ChartThreshold[],
+    padRatio = 0.12
+  ): { min: number; max: number } {
+    if (values.length === 0) return { min: 0, max: 1 };
+
+    let min = calculateMin(values);
+    let max = calculateMax(values);
     if (max === min) return { min: Math.max(0, min - 1), max: max + 1 };
-    const pad = (max - min) * 0.12;
+
+    for (const guide of guides) {
+      const value = guide.value;
+      if (!Number.isFinite(value)) continue;
+      if (value > max && value <= max * THRESHOLD_DOMAIN_FACTOR) max = value;
+      if (value < min && value >= min * (1 / THRESHOLD_DOMAIN_FACTOR)) min = value;
+    }
+
+    const pad = (max - min) * padRatio;
     return { min: Math.max(0, min - pad), max: max + pad };
-  });
+  }
+
+  const primaryDomain = $derived.by(() =>
+    domainWithThresholds(primary?.values ?? [], thresholds)
+  );
 
   const secondaryDomain = $derived.by(() => {
     if (!secondary || secondary.values.length === 0) return primaryDomain;

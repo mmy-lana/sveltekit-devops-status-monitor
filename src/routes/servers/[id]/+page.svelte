@@ -10,6 +10,7 @@
   import RefreshRateDropdown from '$lib/components/compound/RefreshRateDropdown.svelte';
   import { monitorStore } from '$lib/stores/monitorStore.svelte';
   import { db, getLogsForServer } from '$lib/db';
+  import { FLEET_SCOPE } from '$lib/engine/alarmEvaluator';
   import { describeThreshold } from '$lib/utils/alarmUtils';
   import { durationForTimeRange, formatRelativeTime } from '$lib/utils/formatting';
   import type { AlarmRule, LogEntry, MetricType, TimeRangeValue } from '$lib/types/monitor';
@@ -28,18 +29,34 @@
   let loadingSeries = $state(true);
   let loadingLogs = $state(true);
   let logsError = $state<string | null>(null);
+  let seriesError = $state<string | null>(null);
+  let alarmsError = $state<string | null>(null);
 
   const serverIncidents = $derived(
     monitorStore.incidents.filter((incident) => incident.serverId === serverId)
   );
 
+  /**
+   * Threshold guides drawn on the chart.
+   *
+   * Fleet-scoped rules apply to this instance exactly as local rules do, so they
+   * must be included; a guide is only meaningful if it guards a series the chart
+   * is currently plotting, so the active metrics filter is applied too.
+   */
   const thresholds = $derived(
     serverAlarms
-      .filter((alarm) => alarm.enabled && alarm.serverId === serverId)
+      .filter(
+        (alarm) =>
+          alarm.enabled &&
+          (alarm.serverId === serverId || alarm.serverId === FLEET_SCOPE) &&
+          (alarm.metric === activeMetric || alarm.metric === secondaryMetric)
+      )
       .map((alarm) => ({
         value: alarm.threshold,
         label: `${alarm.metric} ${describeThreshold(alarm).split(' ').slice(1).join(' ')}`,
-        tone: (alarm.operator === 'LT' || alarm.operator === 'LTE' ? 'amber' : 'rose') as 'amber' | 'rose'
+        tone: (alarm.operator === 'LT' || alarm.operator === 'LTE' ? 'amber' : 'rose') as
+          | 'amber'
+          | 'rose'
       }))
       .slice(0, 4)
   );
@@ -47,6 +64,7 @@
   async function loadSeries() {
     if (!serverId) return;
     loadingSeries = true;
+    seriesError = null;
     try {
       const since = Date.now() - durationForTimeRange(range);
       const primary = await monitorStore.loadMetricSeries(serverId, activeMetric, since);
@@ -55,6 +73,10 @@
           ? await monitorStore.loadMetricSeries(serverId, 'networkIn', since)
           : await monitorStore.loadMetricSeries(serverId, secondaryMetric, since);
       series = [primary, comparison];
+    } catch (error) {
+      // Keep the last good series on screen so the chart does not blank out on a
+      // transient read failure, and surface the reason to the operator.
+      seriesError = error instanceof Error ? error.message : 'Unable to read telemetry history';
     } finally {
       loadingSeries = false;
     }
@@ -62,9 +84,15 @@
 
   async function loadAlarms() {
     if (!serverId) return;
-    serverAlarms = await db.alarms
-      .filter((alarm) => alarm.serverId === serverId || alarm.serverId === 'all')
-      .toArray();
+    alarmsError = null;
+    try {
+      serverAlarms = await db.alarms
+        .filter((alarm) => alarm.serverId === serverId || alarm.serverId === FLEET_SCOPE)
+        .toArray();
+    } catch (error) {
+      serverAlarms = [];
+      alarmsError = error instanceof Error ? error.message : 'Unable to read alarm rules';
+    }
   }
 
   async function loadLogs() {
@@ -94,6 +122,17 @@
     void activeMetric;
     void secondaryMetric;
     void loadSeries();
+  });
+
+  /**
+   * Follow the collector.
+   *
+   * Without this the chart froze the moment the first range query finished:
+   * `lastPollAt` is the only signal that new telemetry has landed, and the
+   * range selection is left untouched so the operator keeps their context.
+   */
+  $effect(() => {
+    if (monitorStore.lastPollAt) void loadSeries();
   });
 
   // Logs trail the telemetry store, so they refresh on the poll cadence.
@@ -218,6 +257,31 @@
         />
       {/each}
     </div>
+
+    {#if seriesError}
+      <div
+        class="flex flex-wrap items-center justify-between gap-3 rounded border border-cw-rose/40 bg-cw-rose/10 px-4 py-3"
+        role="alert"
+        data-testid="telemetry-error"
+      >
+        <p class="min-w-0 text-[12px] leading-snug text-cw-rose">
+          Telemetry history is unavailable: {seriesError}
+        </p>
+        <Button variant="secondary" size="sm" testId="telemetry-retry" onclick={() => void loadSeries()}>
+          Retry
+        </Button>
+      </div>
+    {/if}
+
+    {#if alarmsError}
+      <div
+        class="rounded border border-cw-amber/40 bg-cw-amber/10 px-4 py-3 text-[12px] leading-snug text-cw-amber"
+        role="alert"
+        data-testid="alarms-error"
+      >
+        Alarm rules could not be loaded: {alarmsError}
+      </div>
+    {/if}
 
     <div class="grid gap-4 xl:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
       <ServerDetailMetrics
