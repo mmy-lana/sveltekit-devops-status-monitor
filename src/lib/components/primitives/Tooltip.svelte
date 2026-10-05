@@ -55,11 +55,17 @@
     const margin = 8;
     const gap = 8;
 
-    const width = Math.min(maxWidth, rect.width);
-    let left = rect.left + rect.width / 2 - width / 2;
-    left = Math.min(Math.max(margin, left), window.innerWidth - width - margin);
+    /*
+     * Horizontal placement must use the BUBBLE width, not the trigger width.
+     * The trigger is a 44px icon button while the bubble renders up to
+     * `maxWidth`, so centring on the trigger and clamping against 44px let a
+     * 280px bubble overflow the viewport by well over 200px near either edge.
+     */
+    const bubbleWidth = Math.min(maxWidth, window.innerWidth - margin * 2);
+    let left = rect.left + rect.width / 2 - bubbleWidth / 2;
+    left = Math.min(Math.max(margin, left), window.innerWidth - bubbleWidth - margin);
 
-    // Measure the bubble after it renders; approximate with the content length first.
+    // Vertical placement uses an estimate refined once the bubble has rendered.
     const estimatedHeight = Math.min(160, 40 + Math.ceil(content.length / 34) * 17);
     const fitsAbove = rect.top - gap - estimatedHeight >= margin;
     const resolvedPlacement: TooltipPlacement = fitsAbove ? 'top' : 'bottom';
@@ -143,7 +149,10 @@
       data-testid="tooltip"
       data-placement={position.placement}
       class="fixed z-50 rounded border border-slate-border-strong bg-slate-surface px-3 py-2 font-sans text-[11px] leading-relaxed text-cw-text shadow-overlay"
-      style={`left: ${position.left}px; top: ${position.top}px; max-width: ${maxWidth}px;`}
+      style={`left: ${position.left}px; top: ${position.top}px; width: ${Math.min(
+        maxWidth,
+        window.innerWidth - 16
+      )}px;`}
     >
       {#if children}
         {@render children()}

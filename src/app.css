@@ -224,6 +224,24 @@
   .tnum {
     font-variant-numeric: tabular-nums;
   }
+
+  /*
+   * Stretched-link card.
+
+   * The card carries an absolutely positioned overlay anchor so the whole
+   * surface is tappable, while cell-level controls must still win the hit test.
+   * Content sits above the overlay and is transparent to pointer events, with
+   * genuine controls opting back in.
+  */
+  .stretched-content {
+    position: relative;
+    z-index: 1;
+    pointer-events: none;
+  }
+
+  .stretched-content :is(a, button, input, select, textarea, label, [role='button'], [role='tab']) {
+    pointer-events: auto;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

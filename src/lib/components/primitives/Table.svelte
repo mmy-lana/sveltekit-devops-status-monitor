@@ -137,50 +137,69 @@
   </div>
 {/snippet}
 
+<!--
+  Mobile card row.
+
+  The card is a plain container, never an anchor. Cell content routinely renders
+  its own links and buttons (a drill-down link plus an "Edit metadata" action),
+  and wrapping those in an <a> produces nested interactive elements: invalid
+  HTML, duplicated tab stops, and touch gestures that resolve to the wrong
+  target. Navigation is therefore exposed through the primary cell's own link,
+  and row-level activation is a sibling button rather than a wrapper.
+-->
+{#snippet cardCells(row: TRow)}
+  {#each columns as column (column.key)}
+    {#if column.primary || column.key === gridColumns[0]?.key}
+      <div class="mb-1.5 text-[13px] font-semibold text-cw-text">{@render cell(row, column)}</div>
+    {:else}
+      <div class="flex items-baseline justify-between gap-3 py-0.5">
+        <span class="shrink-0 text-[10px] uppercase tracking-wider text-cw-faint">
+          {column.label}
+        </span>
+        <span class="min-w-0 text-right text-[12px] text-cw-text">
+          {@render cell(row, column)}
+        </span>
+      </div>
+    {/if}
+  {/each}
+{/snippet}
+
 {#snippet cardRow(row: TRow, href: string | undefined, interactive: boolean)}
-  {#if href}
-    <a href={href} class="block min-h-11 px-4 py-3 transition-colors hover:bg-slate-surface/70">
-      {#each columns as column (column.key)}
-        {#if column.primary || column.key === gridColumns[0]?.key}
-          <div class="mb-1.5 text-[13px] font-semibold text-cw-text">{@render cell(row, column)}</div>
-        {:else}
-          <div class="flex items-baseline justify-between gap-3 py-0.5">
-            <span class="shrink-0 text-[10px] uppercase tracking-wider text-cw-faint">
-              {column.label}
-            </span>
-            <span class="min-w-0 text-right text-[12px] text-cw-text">
-              {@render cell(row, column)}
-            </span>
-          </div>
-        {/if}
-      {/each}
-    </a>
-  {:else}
-    <button
-      type="button"
-      disabled={!interactive}
-      class="block min-h-11 w-full px-4 py-3 text-left transition-colors {interactive
-        ? 'cursor-pointer hover:bg-slate-surface/70'
-        : 'cursor-default'}"
-      data-testid="table-card-button"
-      onclick={() => onrowactivate?.(row)}
-    >
-      {#each columns as column (column.key)}
-        {#if column.primary || column.key === gridColumns[0]?.key}
-          <div class="mb-1.5 text-[13px] font-semibold text-cw-text">{@render cell(row, column)}</div>
-        {:else}
-          <div class="flex items-baseline justify-between gap-3 py-0.5">
-            <span class="shrink-0 text-[10px] uppercase tracking-wider text-cw-faint">
-              {column.label}
-            </span>
-            <span class="min-w-0 text-right text-[12px] text-cw-text">
-              {@render cell(row, column)}
-            </span>
-          </div>
-        {/if}
-      {/each}
-    </button>
-  {/if}
+  <div
+    class="relative px-4 py-3 transition-colors hover:bg-slate-surface/70"
+    data-testid="table-card-body"
+  >
+    <div class="stretched-content">
+      {@render cardCells(row)}
+    </div>
+
+    {#if href}
+      <!--
+        Stretched link: the overlay anchor keeps the whole card tappable while
+        staying a sibling of the cell content, never an ancestor of it. It is
+        hidden from assistive technology and removed from the tab order because
+        the primary cell already exposes a properly labelled link to the same
+        destination, which would otherwise be announced twice.
+      -->
+      <a
+        href={href}
+        data-testid="table-card-overlay-link"
+        aria-hidden="true"
+        tabindex="-1"
+        class="absolute inset-0 z-0"
+        onclick={(event: MouseEvent) => event.stopPropagation()}
+      ></a>
+    {:else if interactive}
+      <button
+        type="button"
+        data-testid="table-card-button"
+        class="mt-1 inline-flex min-h-11 items-center rounded border border-slate-border-strong px-3 text-[12px] text-cw-muted transition-colors hover:bg-white/5 hover:text-cw-text"
+        onclick={() => onrowactivate?.(row)}
+      >
+        Open details
+      </button>
+    {/if}
+  </div>
 {/snippet}
 
 <div class="@container w-full {className}" data-testid={testId}>

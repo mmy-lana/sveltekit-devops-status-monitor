@@ -1657,6 +1657,280 @@ async function auditPhase2Telemetry(page) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Audit phase 3 — mobile viewport and layout integrity                */
+/* ------------------------------------------------------------------ */
+
+async function auditPhase3Layout(page) {
+  section('Audit Phase 3 · Mobile Viewport & Layout Integrity');
+
+  await page.goto(`${BASE_URL}/`, { waitUntil: 'networkidle' });
+  await waitForFleetReady(page);
+  await page.waitForTimeout(400);
+
+  /* ---- UI-01: no nested interactive elements -------------------------- */
+  for (const width of [360, 390, 430]) {
+    await page.setViewportSize({ width, height: 780 });
+    await page.waitForTimeout(300);
+
+    const nesting = await page.evaluate(() => {
+      const nestedAnchors = Array.from(document.querySelectorAll('a a')).map((el) => ({
+        outer: el.parentElement?.tagName,
+        innerText: (el.textContent ?? '').trim().slice(0, 40)
+      }));
+      const nestedButtons = Array.from(document.querySelectorAll('a button')).map((el) => ({
+        outerHref: el.closest('a')?.getAttribute('href') ?? null,
+        innerText: (el.textContent ?? '').trim().slice(0, 40)
+      }));
+      const nestedSelects = Array.from(document.querySelectorAll('a select, a input')).length;
+      const interactiveInButton = Array.from(
+        document.querySelectorAll('button a, button button, button input')
+      ).length;
+      const cards = document.querySelectorAll('[data-testid="table-card-body"]').length;
+      const overlays = document.querySelectorAll('[data-testid="table-card-overlay-link"]').length;
+      const overlayHidden = Array.from(
+        document.querySelectorAll('[data-testid="table-card-overlay-link"]')
+      ).every((el) => el.getAttribute('aria-hidden') === 'true' && el.getAttribute('tabindex') === '-1');
+
+      return {
+        nestedAnchors,
+        nestedButtons,
+        nestedSelects,
+        interactiveInButton,
+        cards,
+        overlays,
+        overlayHidden
+      };
+    });
+
+    assertEqual(
+      nesting.nestedAnchors.length,
+      0,
+      `[${width}px] No anchor contains another anchor (${nesting.nestedAnchors.length} found)`
+    );
+    assertEqual(
+      nesting.nestedButtons.length,
+      0,
+      `[${width}px] No anchor contains a button (${nesting.nestedButtons.length} found)`
+    );
+    assertEqual(nesting.nestedSelects, 0, `[${width}px] No anchor contains a form control`);
+    assertEqual(
+      nesting.interactiveInButton,
+      0,
+      `[${width}px] No button contains another interactive element`
+    );
+    assert(nesting.cards > 0, `[${width}px] Mobile cards render as containers (${nesting.cards})`);
+    assertEqual(nesting.overlays, nesting.cards, `[${width}px] Each card carries exactly one overlay link`);
+    assert(nesting.overlayHidden, `[${width}px] Overlay links are hidden from assistive tech and tab order`);
+  }
+
+  /* ---- UI-01: Edit action opens the modal, no navigation -------------- */
+  await page.setViewportSize({ width: 360, height: 780 });
+  await page.waitForTimeout(300);
+
+  const urlBefore = page.url();
+  const editSelector = '[data-testid^="asset-edit-"]';
+  const editVisible = await page.locator(`${editSelector}:visible`).count();
+  assert(editVisible > 0, `[360px] Row-level edit actions are reachable in card mode (${editVisible})`);
+
+  if (editVisible > 0) {
+    // The grid and card layouts both render the cell snippet; only one is
+    // displayed at a given viewport, so the click must target the visible copy.
+    await page.locator(`${editSelector}:visible`).first().click();
+    await page.waitForTimeout(500);
+
+    const modalOpen = await page.locator('[data-testid="asset-form"]').count();
+    assert(modalOpen > 0, '[360px] Tapping Edit metadata opens the asset modal');
+    assertEqual(page.url(), urlBefore, '[360px] Tapping Edit metadata does not navigate away');
+
+    const modalNesting = await page.evaluate(
+      () => document.querySelectorAll('a a, a button, button button').length
+    );
+    assertEqual(modalNesting, 0, '[360px] The asset modal contains no nested interactive elements');
+
+    await page.locator('[data-testid="asset-close"]').click();
+    await page.waitForTimeout(400);
+    assertEqual(
+      await page.locator('[data-testid="asset-form"]').count(),
+      0,
+      '[360px] The asset modal dismisses without navigating'
+    );
+  }
+
+  /* ---- UI-01: overlay link navigates when the card body is tapped ----- */
+  const overlay = page.locator('[data-testid="table-card-overlay-link"]').first();
+  if (await overlay.count()) {
+    const overlayHref = await overlay.getAttribute('href');
+    assert(
+      Boolean(overlayHref && overlayHref.startsWith('/servers/')),
+      `[360px] The stretched overlay links to the instance route (${overlayHref})`
+    );
+  }
+
+  /* ---- UI-02: tooltip stays inside the viewport at the right edge ----- */
+  const tooltipAt = async (x, y, viewportWidth) => {
+    await page.setViewportSize({ width: viewportWidth, height: 780 });
+    await page.waitForTimeout(250);
+
+    return page.evaluate(
+      async ({ px, py }) => {
+        const triggers = Array.from(document.querySelectorAll('[data-testid="tooltip-trigger"]'));
+        if (triggers.length === 0) return { missing: true };
+
+        const target = triggers[triggers.length - 1];
+        const rect = target.getBoundingClientRect();
+        // Park the trigger flush against the requested viewport edge.
+        target.style.position = 'fixed';
+        target.style.left = `${px}px`;
+        target.style.top = `${py}px`;
+        target.style.zIndex = '9999';
+
+        target.click();
+        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+
+        const bubble = document.querySelector('[data-testid="tooltip"]');
+        if (!bubble) return { missing: false, opened: false, originalRect: rect };
+
+        const box = bubble.getBoundingClientRect();
+        const placement = bubble.getAttribute('data-placement');
+        target.click();
+
+        return {
+          missing: false,
+          opened: true,
+          left: box.left,
+          right: box.right,
+          top: box.top,
+          bottom: box.bottom,
+          width: box.width,
+          innerWidth: window.innerWidth,
+          innerHeight: window.innerHeight,
+          placement
+        };
+      },
+      { px: x, py: y }
+    );
+  };
+
+  for (const width of [360, 390, 430, 768, 1280]) {
+    const edge = await tooltipAt(width - 30, 300, width);
+    assert(!edge.missing, `[${width}px] A tooltip trigger is available for the boundary probe`);
+    if (!edge.opened) continue;
+
+    assert(
+      edge.right <= edge.innerWidth,
+      `[${width}px] Tooltip right edge stays within the viewport (${Math.round(edge.right)} <= ${edge.innerWidth})`
+    );
+    assert(edge.left >= 0, `[${width}px] Tooltip left edge stays within the viewport (${Math.round(edge.left)} >= 0)`);
+    assert(
+      edge.width <= 280 + 1,
+      `[${width}px] Tooltip width respects the 280px maximum (${Math.round(edge.width)})`
+    );
+    assert(
+      edge.bottom <= edge.innerHeight,
+      `[${width}px] Tooltip bottom edge stays within the viewport (${Math.round(edge.bottom)} <= ${edge.innerHeight})`
+    );
+    assert(edge.top >= 0, `[${width}px] Tooltip top edge stays within the viewport`);
+  }
+
+  const startEdge = await tooltipAt(2, 300, 360);
+  if (startEdge.opened) {
+    assert(
+      startEdge.left >= 0 && startEdge.right <= startEdge.innerWidth,
+      `[360px] Tooltip stays inside the viewport when anchored at the left edge (${Math.round(
+        startEdge.left
+      )}..${Math.round(startEdge.right)} of ${startEdge.innerWidth})`
+    );
+  }
+
+  const bottomEdge = await tooltipAt(180, 740, 360);
+  if (bottomEdge.opened) {
+    assert(
+      bottomEdge.top >= 0 && bottomEdge.bottom <= bottomEdge.innerHeight,
+      `[360px] Tooltip flips upward when anchored near the bottom edge (${Math.round(
+        bottomEdge.top
+      )}..${Math.round(bottomEdge.bottom)} of ${bottomEdge.innerHeight})`
+    );
+  }
+
+  /* ---- viewport matrix: overflow, clipping and tap targets ------------ */
+  await page.goto(`${BASE_URL}/`, { waitUntil: 'networkidle' });
+  await waitForFleetReady(page);
+  await page.waitForTimeout(300);
+
+  for (const viewport of VIEWPORTS) {
+    await page.setViewportSize({ width: viewport.width, height: viewport.height });
+    await page.waitForTimeout(250);
+
+    const overflow = await page.evaluate(OVERFLOW_PROBE);
+    assert(
+      overflow.length === 0,
+      `[matrix @ ${viewport.name}] No element overflows the ${viewport.width}px viewport`,
+      overflow.length ? JSON.stringify(overflow, null, 1) : undefined
+    );
+
+    const clipped = await page.evaluate(CLIPPING_PROBE);
+    assert(
+      clipped.length === 0,
+      `[matrix @ ${viewport.name}] No text node is clipped`,
+      clipped.length ? JSON.stringify(clipped, null, 1) : undefined
+    );
+
+    const small = await page.evaluate(TAP_TARGET_PROBE);
+    assert(
+      small.length === 0,
+      `[matrix @ ${viewport.name}] Every interactive target is at least 44x44`,
+      small.length ? JSON.stringify(small, null, 1) : undefined
+    );
+
+    const scrollX = await page.evaluate(
+      () => document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1
+    );
+    assert(scrollX, `[matrix @ ${viewport.name}] No horizontal page scroll`);
+
+    const hierarchy = await page.evaluate(
+      () => document.querySelectorAll('a a, a button, button button, a select').length
+    );
+    assertEqual(hierarchy, 0, `[matrix @ ${viewport.name}] No nested interactive elements anywhere`);
+  }
+
+  /* ---- the same matrix on the remaining routes ----------------------- */
+  for (const route of ['/alarms', '/incidents', '/servers/srv-use1-api-01']) {
+    await page.goto(`${BASE_URL}${route}`, { waitUntil: 'networkidle' });
+    await waitForFleetReady(page);
+    await page.waitForTimeout(350);
+
+    for (const viewport of VIEWPORTS) {
+      await page.setViewportSize({ width: viewport.width, height: viewport.height });
+      await page.waitForTimeout(220);
+
+      const overflow = await page.evaluate(OVERFLOW_PROBE);
+      assert(
+        overflow.length === 0,
+        `[${route} @ ${viewport.name}] No element overflows the ${viewport.width}px viewport`,
+        overflow.length ? JSON.stringify(overflow, null, 1) : undefined
+      );
+
+      const small = await page.evaluate(TAP_TARGET_PROBE);
+      assert(
+        small.length === 0,
+        `[${route} @ ${viewport.name}] Every interactive target is at least 44x44`,
+        small.length ? JSON.stringify(small, null, 1) : undefined
+      );
+
+      const hierarchy = await page.evaluate(
+        () => document.querySelectorAll('a a, a button, button button, a select').length
+      );
+      assertEqual(hierarchy, 0, `[${route} @ ${viewport.name}] No nested interactive elements`);
+
+      const scrollX = await page.evaluate(
+        () => document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1
+      );
+      assert(scrollX, `[${route} @ ${viewport.name}] No horizontal page scroll`);
+    }
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* Audit phase 1 — security and data layer integrity                   */
 /* ------------------------------------------------------------------ */
 
@@ -2203,6 +2477,7 @@ async function main() {
     await auditPhase1Security(phase1Page);
     if (maxPhase >= 2) await checkPhase2(phase1Page);
     await auditPhase2Telemetry(phase1Page);
+    await auditPhase3Layout(phase1Page);
 
     if (maxPhase >= 3) await checkPhase3(phase1Page);
 
